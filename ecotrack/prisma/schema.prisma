@@ -1,0 +1,105 @@
+// Prisma schema for HimkaPlastic project
+// Defines User and Order models for PostgreSQL
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  name      String
+  password  String
+  isAdmin   Boolean  @default(false)
+  role      String?
+  companyName      String?
+  inn             String?
+  kpp             String?
+  billingAddress   String?
+  dashboardSettings String?
+  orders    Order[]
+  assignedRoutes LogisticRoute[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Order {
+  id                  String   @id @default(uuid())
+  user                User     @relation(fields: [userId], references: [id])
+  userId              String
+  materialType        String
+  volume              Float
+  price               Float
+  environmentalImpact Float
+  status              String   @default("pending")
+  pickupAddress       String
+  paymentStatus       String   @default("unpaid")
+  paymentMethod       String?
+  invoiceNumber       String?
+  logisticRoutes      LogisticRoute[]
+  documents           OrderDocument[]
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+model InventoryItem {
+  id                String   @id @default(uuid())
+  materialType      String   @unique
+  availableQuantity Float
+  reservedQuantity  Float    @default(0)
+  location          String
+  minThreshold      Float
+  maxCapacity       Float
+  lastUpdated       DateTime @default(now())
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+model LogisticRoute {
+  id                    String   @id @default(uuid())
+  order                 Order    @relation(fields: [orderId], references: [id])
+  orderId               String
+  pickupAddress         String
+  deliveryAddress       String
+  estimatedDistance     Float
+  status                String   @default("pending") // pending, accepted, in_progress, completed
+  assignedLogistician   User     @relation(fields: [assignedLogisticianId], references: [id])
+  assignedLogisticianId String
+  routeOptions          RouteOption[]
+  selectedAt            DateTime?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+}
+
+model RouteOption {
+  id              String        @id @default(uuid())
+  logisticRoute   LogisticRoute @relation(fields: [logisticRouteId], references: [id])
+  logisticRouteId String
+  name            String
+  estimatedCost   Float
+  estimatedTime   Int           // в минутах
+  transportType   String
+  description     String?
+  isSelected      Boolean       @default(false)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+}
+
+model OrderDocument {
+  id            String   @id @default(uuid())
+  order         Order    @relation(fields: [orderId], references: [id])
+  orderId       String
+  documentType  String   // DELIVERY_INVOICE, QUALITY_CERTIFICATE, etc.
+  customerInfo  Json
+  orderDetails  Json
+  logisticsInfo Json?
+  status        String   @default("generated")
+  generatedAt   DateTime @default(now())
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}

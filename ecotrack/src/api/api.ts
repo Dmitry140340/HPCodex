@@ -1,10 +1,14 @@
 import { db } from "../server/db";
 import { getAuth, sendEmail, signIn as authSignIn, signOut as authSignOut, signUp as authSignUp } from "../server/actions";
 import type { User, Order, MarketRate, PriceCalculation, FinancialReport, Analytics } from "../utils/api";
+import type { InventoryItem, LogisticRoute, RouteOption, OrderDocument } from "../types/temp-models";
 import { z } from "zod";
 import { format } from "date-fns";
 import { ru } from "date-fns/locale";
 import { getRegionFromAddress, calculateDistance, HIMKA_PLASTIC_ADDRESS, HIMKA_PLASTIC_COORDINATES } from "../utils/yandexMaps";
+import { enhancedNotificationService } from '../utils/enhancedNotifications';
+import { notificationPreferencesService } from '../services/notificationPreferencesService';
+import { analyticsService } from '../services/analyticsService';
 
 // Helper type for order data
 interface OrderData {
@@ -26,68 +30,84 @@ interface PriceParams {
 }
 
 // Authentication handlers
-export const signIn = async (email: string, password: string) => {
-  return authSignIn(email, password);
-};
+export { signIn, signOut, signUp } from "../server/actions";
 
-export const signUp = async (userData: { email: string; password: string; name: string; companyName?: string }) => {
-  return authSignUp(userData);
-};
+// Helper function to get users by role
+export async function getUsersByRole(role: 'client' | 'manager' | 'logistic' | 'admin'): Promise<User[]> {
+  // В текущей системе роль определяется по email домену в actions.ts
+  // Получаем всех пользователей и фильтруем по email
+  const allUsers = await db.user.findMany();
+  
+  return allUsers.filter(user => {
+    let userRole: 'client' | 'manager' | 'logistic' | 'admin' = 'client';
+    
+    if (user.isAdmin || user.email.endsWith('@admin.com') || user.email === 'admin@himkaplastic.ru') {
+      userRole = 'admin';
+    } else if (user.email.endsWith('@manager.com')) {
+      userRole = 'manager';
+    } else if (user.email.endsWith('@logistic.com')) {
+      userRole = 'logistic';
+    }
+    
+    return userRole === role;
+  }).map(user => prismaUserToUser(user));
+}
 
-export const signOut = async (token: string) => {
-  return authSignOut(token);
-};
+
 
 // User Management
-export async function getCurrentUser(): Promise<User> {
-  const auth = await getAuth();
+function prismaUserToUser(user: any): User {
+  return {
+    ...user,
+    role: user.role ?? undefined,
+    companyName: user.companyName ?? undefined,
+    inn: user.inn ?? undefined,
+    kpp: user.kpp ?? undefined,
+    billingAddress: user.billingAddress ?? undefined,
+    dashboardSettings: user.dashboardSettings ?? undefined,
+  };
+}
+
+export async function getCurrentUser(authContext?: any): Promise<User> {
+  // Use provided auth context or fall back to getAuth()
+  const auth = authContext || await getAuth();
   if (!auth.userId) {
     throw new Error("Not authenticated");
   }
   const user = await db.user.findUnique({
     where: { id: auth.userId },
   });
-  
   if (!user) {
     throw new Error("User not found");
   }
-  
-  return user;
+  return prismaUserToUser(user);
 }
 
-export async function updateUserProfile(data: Partial<User>): Promise<User> {
-  const auth = await getAuth();
+export async function updateUserProfile(data: Partial<User>, authContext?: any): Promise<User> {
+  const auth = authContext || await getAuth();
   if (!auth.userId) {
     throw new Error("Not authenticated");
   }
-  return db.user.update({
+  const user = await db.user.update({
     where: { id: auth.userId },
     data,
   });
+  return prismaUserToUser(user);
 }
 
 // Market Rates
+// TODO: Реализовать через Prisma или убрать, если не используется
 export async function getMarketRates(): Promise<MarketRate[]> {
-  return db.marketRate.findMany();
+  // return db.marketRate.findMany();
+  return [];
 }
 
 export async function updateMarketRate(input: {
   materialType: string;
   pricePerKg: number;
 }): Promise<MarketRate> {
-  const auth = await getAuth();
-  if (auth.status !== "authenticated") throw new Error("Not authenticated");
-
-  const user = await db.user.findUnique({
-    where: { id: auth.userId },
-  });
-
-  if (!user?.isAdmin) throw new Error("Not authorized");
-
-  return await db.marketRate.updateMany({
-    where: { materialType: input.materialType },
-    data: { pricePerKg: input.pricePerKg },
-  });
+  // TODO: Реализовать через Prisma
+  throw new Error('Not implemented');
 }
 
 // Order Management
@@ -112,7 +132,8 @@ export async function updateMarketRate(input: {
 async function getDistanceFromAddress(address: string): Promise<number> {
   try {
     // Используем адрес завода ООО Химка пластик как точку отсчета
-    return await calculateDistance(HIMKA_PLASTIC_ADDRESS, address);
+    const distance = await calculateDistance(HIMKA_PLASTIC_ADDRESS, address);
+    return distance ?? 0; // Возвращаем 0, если undefined
   } catch (error) {
     console.error("Failed to calculate distance using Yandex Maps:", error);
     // Fallback to our previous implementation
@@ -170,49 +191,45 @@ function getFallbackRegion(address: string): string {
 }
 
 export async function calculateOrderPrice(orderData: PriceParams): Promise<PriceCalculation> {
-  // Get market rate for the material type
-  const materialRate = await db.marketRate.findFirst({
-    where: { materialType: orderData.materialType },
+  // Получаем актуальную рыночную цену с биржи вторсырья
+  const { recycleApi } = await import('../utils/recycleApi');
+  const materialPrice = await recycleApi.getMaterialPrice(orderData.materialType);
+  
+  console.log(`💰 Расчет цены для ${orderData.materialType}:`, {
+    volume: orderData.volume,
+    materialPrice: materialPrice,
+    address: orderData.pickupAddress
   });
-
-  if (!materialRate) {
-    throw new Error(`No market rate found for ${orderData.materialType}`);
-  }
-
-  // Calculate base price
-  const basePrice = orderData.volume * materialRate.pricePerKg;
 
   // Get distance based on pickup address using Yandex Maps API
   const distance = orderData.distance || await getDistanceFromAddress(orderData.pickupAddress);
 
-  // Используем фиксированную ставку 63 рубля за км для расчета логистики
-  const LOGISTICS_COST_PER_KM = 63;
-  const logisticsCost = distance * LOGISTICS_COST_PER_KM;
-
-  // Get region from address using Yandex Maps API
+  // Гарантируем неотрицательные значения
+  const safeVolume = Math.max(0, orderData.volume);
+  const safeDistance = Math.max(0, distance);
+  // Константы для расчета согласно ТЗ
+  const LOGISTICS_COST_PER_KM = 70; // Ld = 70 рублей (константа)
+  const customsDuty = 200; // Tc - таможенные пошлины
+  const environmentalTaxRate = 0.5; // Me - экологический налог
   const region = await getRegionFromAddress(orderData.pickupAddress);
-
-  // Get regional taxes and duties
-  const regionalTaxes = await db.regionalTax.findFirst({
-    where: { region },
-  });
-
-  const customsDuty = regionalTaxes?.customsDuty || 200;
-  const environmentalTaxRate = regionalTaxes?.environmentalTax || 0.5;
-  const environmentalTax = orderData.volume * environmentalTaxRate;
-
-  // Calculate environmental impact (carbon footprint reduction)
-  const environmentalImpact = orderData.volume * 1.5; // 1.5kg CO2 saved per kg recycled
-
-  // Calculate total price
-  const totalPrice = basePrice - logisticsCost - customsDuty - environmentalTax;
+  const environmentalImpact = safeVolume * 1.5; // 1.5kg CO2 saved per kg recycled
+  // Формула по ТЗ: C = (P_m * V) + (L_d * D) + T_c + M_e
+  // P_m - средняя рыночная стоимость от API бирж
+  // V - объем заказа, введенный пользователем  
+  // L_d - 70 рублей константа
+  // D - расстояние от API Яндекс.Карт
+  const basePrice = safeVolume * materialPrice; // (P_m * V)
+  const logisticsCost = LOGISTICS_COST_PER_KM * safeDistance; // (L_d * D)
+  const environmentalTax = safeVolume * environmentalTaxRate; // M_e
+  let totalPrice = basePrice + logisticsCost + customsDuty + environmentalTax;
+  if (totalPrice < 0) totalPrice = 0;
 
   return {
     basePrice,
     logisticsCost,
     customsDuty,
     environmentalTax,
-    distance,
+    distance: safeDistance,
     region,
     totalPrice,
     environmentalImpact,
@@ -220,16 +237,22 @@ export async function calculateOrderPrice(orderData: PriceParams): Promise<Price
   };
 }
 
-export async function createOrder(orderData: OrderData): Promise<Order> {
-  const auth = await getAuth();
+export async function createOrder(orderData: OrderData, authContext?: any): Promise<Order> {
+  const auth = authContext || await getAuth();
   if (!auth.userId) {
     throw new Error("Not authenticated");
+  }
+
+  // Check inventory availability before proceeding
+  const isAvailable = await checkInventoryAvailability(orderData.materialType, orderData.volume);
+  if (!isAvailable) {
+    throw new Error(`Insufficient inventory for ${orderData.materialType}. Required: ${orderData.volume} kg`);
   }
 
   // Calculate price and environmental impact
   const priceCalculation = await calculateOrderPrice(orderData);
 
-  // Create the order in database
+  // ВАЖНО: явно указываем все обязательные поля для Prisma
   const order = await db.order.create({
     userId: auth.userId,
     materialType: orderData.materialType,
@@ -237,26 +260,100 @@ export async function createOrder(orderData: OrderData): Promise<Order> {
     pickupAddress: orderData.pickupAddress,
     price: priceCalculation.totalPrice,
     status: "pending",
+    paymentStatus: "unpaid",
     environmentalImpact: priceCalculation.environmentalImpact,
   });
 
-  // Send confirmation email
-  await sendEmail({
-    to: "customer@example.com", // In real app, would be user's email
-    subject: `Order Confirmation: #${order.id}`,
-    html: `
-      <h1>Your order has been received</h1>
-      <p>Thank you for your order. We have received your request for ${orderData.volume}kg of ${orderData.materialType}.</p>
-      <p>Total price: ₽${priceCalculation.totalPrice.toFixed(2)}</p>
-      <p>Environmental impact: ${priceCalculation.environmentalImpact.toFixed(2)}kg CO2 saved</p>
-    `,
+  // Reserve material in inventory after order creation
+  try {
+    await reserveMaterial({
+      materialType: orderData.materialType,
+      quantity: orderData.volume,
+      orderId: order.id
+    });
+  } catch (error) {
+    // If reservation fails, delete the order and re-throw error
+    await db.order.delete({ where: { id: order.id } });
+    throw new Error(`Failed to reserve materials: ${error.message}`);
+  }
+  // Получаем данные пользователя для отправки уведомлений
+  const user = await db.user.findUnique({ 
+    where: { id: auth.userId }
   });
+
+  if (user?.email) {
+    // Отправляем уведомления через новую расширенную систему
+    const { enhancedNotificationService } = await import('../utils/enhancedNotifications');
+    
+    try {      // Отправляем уведомление о создании заказа через шаблон
+      await enhancedNotificationService.sendNotificationFromTemplate(
+        'order-created',
+        auth.userId,
+        {
+          userName: user.name || 'Уважаемый клиент',
+          orderId: order.id,
+          orderAmount: priceCalculation.totalPrice.toFixed(2)
+        },
+        {
+          userEmail: user.email,
+          userPhone: undefined, // Phone field not available in current schema
+          orderId: order.id,
+          priority: 'medium'
+        }
+      );
+
+      // Отправляем детальное уведомление о начале обработки заказа
+      await enhancedNotificationService.sendNotificationFromTemplate(
+        'order-processing-started',
+        auth.userId,
+        {
+          orderId: order.id,
+          materialType: orderData.materialType,
+          volume: orderData.volume.toString(),
+          pickupAddress: orderData.pickupAddress,
+          orderAmount: priceCalculation.totalPrice.toFixed(2),
+          environmentalImpact: priceCalculation.environmentalImpact.toFixed(2),
+          trackingUrl: `${process.env.FRONTEND_URL}/dashboard?tab=orders&order=${order.id}`
+        },
+        {
+          userEmail: user.email,
+          userPhone: undefined, // Phone field not available in current schema
+          orderId: order.id,
+          priority: 'medium'
+        }
+      );
+
+      console.log(`✅ Уведомления о создании заказа ${order.id} отправлены пользователю ${user.email}`);
+    } catch (error) {
+      console.error('❌ Ошибка отправки уведомлений о создании заказа:', error);
+      // Не прерываем создание заказа из-за ошибки уведомлений
+    }
+  }
+
+  // Fallback старая система (для обратной совместимости)
+  try {
+    await sendEmail({
+      to: user?.email || "customer@example.com",
+      subject: `Подтверждение заказа №${order.id}`,
+      html: `
+        <h1>Ваш заказ принят в обработку</h1>
+        <p>Спасибо за ваш заказ. Мы получили запрос на ${orderData.volume} кг ${orderData.materialType}.</p>
+        <p>Общая стоимость: ₽${priceCalculation.totalPrice.toFixed(2)}</p>
+        <p>Экологический эффект: ${priceCalculation.environmentalImpact.toFixed(2)} кг CO₂ сэкономлено</p>
+      `,
+    });
+  } catch (error) {
+    console.error('❌ Ошибка отправки fallback email:', error);
+  }
+
+  // Автоматически создаем логистические маршруты для нового заказа
+  await createAutomaticLogisticRoutes(order.id, orderData.pickupAddress);
 
   return order;
 }
 
-export async function getUserOrders(): Promise<Order[]> {
-  const auth = await getAuth();
+export async function getUserOrders(authContext?: any): Promise<Order[]> {
+  const auth = authContext || await getAuth();
   if (!auth.userId) {
     throw new Error("Not authenticated");
   }
@@ -268,8 +365,8 @@ export async function getUserOrders(): Promise<Order[]> {
   return orders;
 }
 
-export async function getOrderById(input: { id: string }): Promise<Order> {
-  const auth = await getAuth();
+export async function getOrderById(input: { id: string }, authContext?: any): Promise<Order> {
+  const auth = authContext || await getAuth();
   if (auth.status !== "authenticated") throw new Error("Not authenticated");
 
   const order = await db.order.findUnique({
@@ -302,41 +399,130 @@ export async function updateOrderStatus(input: { id: string; status: string }): 
     where: { id: input.id },
     data: { status: input.status },
   });
+    // Получаем данные клиента для отправки уведомлений
+  const customer = await db.user.findUnique({ 
+    where: { id: order.userId }
+  });
 
-  // Send status update email to customer
-  try {
-    const customer = await db.user.findUnique({ where: { id: order.userId } });
-    if (customer?.email) {
+  if (customer?.email) {
+    try {
+      // Отправляем уведомления через новую расширенную систему
+      const { enhancedNotificationService } = await import('../utils/enhancedNotifications');
+      
+      // Определяем подходящий шаблон в зависимости от статуса
+      let templateId = 'order-status-changed';
+      let variables: Record<string, string> = {
+        orderId: order.id,
+        newStatus: input.status
+      };
+
+      // Используем специализированные шаблоны для определенных статусов
+      switch (input.status) {
+        case 'processing':
+          templateId = 'order-pickup-scheduled';
+          variables = {
+            orderId: order.id,
+            materialType: order.materialType,
+            pickupDate: new Date(Date.now() + 24 * 60 * 60 * 1000).toLocaleDateString('ru-RU'),
+            pickupTime: '10:00-18:00'
+          };
+          break;
+        case 'delivery':
+        case 'in-transit':
+          templateId = 'order-in-transit';
+          variables = {
+            orderId: order.id,
+            pickupAddress: order.pickupAddress,
+            etaTime: new Date(Date.now() + 48 * 60 * 60 * 1000).toLocaleDateString('ru-RU')
+          };
+          break;
+        case 'completed':
+          templateId = 'order-processing-completed';
+          variables = {
+            orderId: order.id,
+            volume: order.volume.toString(),
+            materialType: order.materialType,
+            recycledAmount: (order.volume * 0.85).toFixed(2), // 85% выход
+            environmentalImpact: order.environmentalImpact.toFixed(2),
+            finalAmount: order.price.toFixed(2),
+            paymentStatus: order.paymentStatus === 'paid' ? 'Оплачено' : 'Ожидает оплаты',
+            documentsUrl: `${process.env.FRONTEND_URL}/dashboard?tab=orders&order=${order.id}&documents=true`
+          };
+          break;
+        case 'cancelled':
+          templateId = 'order-cancelled';
+          variables = {
+            orderId: order.id,
+            cancellationReason: 'По техническим причинам'
+          };
+          break;
+      }      // Отправляем уведомление через шаблон
+      await enhancedNotificationService.sendNotificationFromTemplate(
+        templateId,
+        order.userId,
+        variables,
+        {
+          userEmail: customer.email,
+          userPhone: undefined, // Phone field not available in current schema
+          orderId: order.id,
+          priority: input.status === 'cancelled' ? 'high' : 'medium'
+        }
+      );
+
+      console.log(`✅ Уведомление об изменении статуса заказа ${order.id} отправлено через шаблон ${templateId}`);
+    } catch (error) {
+      console.error('❌ Ошибка отправки уведомлений через новую систему:', error);
+    }
+
+    // Fallback старая система для обратной совместимости
+    try {
+      const { notificationService } = await import('../utils/notifications');
+      await notificationService.sendOrderStatusNotification(
+        order.id,
+        input.status,
+        customer.email,
+        undefined // Phone field not available
+      );
+    } catch (error) {
+      console.error('❌ Ошибка отправки уведомлений через старую систему:', error);
+    }
+
+    // Дублируем старую систему email для совместимости
+    try {
       await sendEmail({
         to: customer.email,
-        subject: `Order Status Update - ${input.status.toUpperCase()}`,
-        text: `
-# Order Status Update
-
-Your order status has been updated.
-
-## Order Details
-- Order ID: ${order.id}
-- New Status: ${order.status.toUpperCase()}
-- Material: ${order.materialType}
-- Volume: ${order.volume} kg
-
-You can view more details in your dashboard.
-
-Thank you for choosing EcoTrack!
+        subject: `Обновление статуса заказа №${order.id}`,
+        html: `
+          <h1>Обновление статуса заказа</h1>
+          <p>Уважаемый ${customer.name || 'клиент'}!</p>
+          <p>Статус вашего заказа был обновлен.</p>
+          
+          <h2>Детали заказа</h2>
+          <ul>
+            <li><strong>ID заказа:</strong> ${order.id}</li>
+            <li><strong>Новый статус:</strong> ${input.status}</li>
+            <li><strong>Материал:</strong> ${order.materialType}</li>
+            <li><strong>Объём:</strong> ${order.volume} кг</li>
+            <li><strong>Стоимость:</strong> ₽${order.price.toFixed(2)}</li>
+          </ul>
+          
+          <p>Вы можете просмотреть подробную информацию в <a href="${process.env.FRONTEND_URL}/dashboard?tab=orders">личном кабинете</a>.</p>
+          
+          <p>Спасибо за выбор EcoTrack!</p>
         `,
       });
+    } catch (error) {
+      console.error("❌ Ошибка отправки fallback email:", error);
     }
-  } catch (error) {
-    console.error("Failed to send status update email:", error);
   }
 
+  console.log(`✅ Статус заказа ${order.id} обновлён на "${input.status}"`);
   return order;
 }
 
 // Analytics
-export async function getUserAnalytics(): Promise<Analytics> {
-  const auth = await getAuth();
+export async function getUserAnalytics(authContext?: any): Promise<any> {
+  const auth = authContext || await getAuth();
   if (!auth.userId) {
     throw new Error("Not authenticated");
   }
@@ -348,70 +534,124 @@ export async function getUserAnalytics(): Promise<Analytics> {
   if (orders.length === 0) {
     return {
       totalOrders: 0,
+      totalVolume: 0,
       totalEarnings: 0,
-      totalEnvironmentalImpact: 0,
-      recycledByMaterial: {},
-      ordersByStatus: {},
-      monthlyEarnings: Array(12).fill(0),
-      yearlyVolume: {},
+      totalCO2Saved: 0,
+      monthlyData: [],
+      materialBreakdown: [],
+      orderStatusBreakdown: [],
     };
   }
 
   // Calculate analytics from orders
-  const analytics = orders.reduce(
-    (acc: AnalyticsAccumulator, order: Order) => {
-      // Increment total orders
-      acc.totalOrders += 1;
+  const materialStats: Record<string, number> = {};
+  const statusStats: Record<string, number> = {};
+  const monthlyStats: Record<string, { volume: number; earnings: number; co2Saved: number }> = {};
+  
+  let totalOrders = 0;
+  let totalVolume = 0;
+  let totalEarnings = 0;
+  let totalCO2Saved = 0;
 
-      // Add to total earnings
-      acc.totalEarnings += order.price;
+  orders.forEach(order => {
+    totalOrders += 1;
+    totalVolume += order.volume;
+    totalEarnings += order.price;
+    totalCO2Saved += order.environmentalImpact;
 
-      // Add to total environmental impact
-      acc.totalEnvironmentalImpact += order.environmentalImpact;
-
-      // Group by material type
-      if (!acc.recycledByMaterial[order.materialType]) {
-        acc.recycledByMaterial[order.materialType] = 0;
-      }
-      acc.recycledByMaterial[order.materialType] += order.volume;
-
-      // Group by status
-      if (!acc.ordersByStatus[order.status]) {
-        acc.ordersByStatus[order.status] = 0;
-      }
-      acc.ordersByStatus[order.status] += 1;
-
-      // Add to monthly earnings (by creation date)
-      const orderDate = new Date(order.createdAt);
-      const month = orderDate.getMonth();
-      acc.monthlyEarnings[month] += order.price;
-
-      // Add to yearly volume
-      const year = orderDate.getFullYear();
-      if (!acc.yearlyVolume[year]) {
-        acc.yearlyVolume[year] = 0;
-      }
-      acc.yearlyVolume[year] += order.volume;
-
-      return acc;
-    },
-    {
-      totalOrders: 0,
-      totalEarnings: 0,
-      totalEnvironmentalImpact: 0,
-      recycledByMaterial: {},
-      ordersByStatus: {},
-      monthlyEarnings: Array(12).fill(0),
-      yearlyVolume: {},
+    // Group by material type
+    if (!materialStats[order.materialType]) {
+      materialStats[order.materialType] = 0;
     }
-  );
+    materialStats[order.materialType] += order.volume;
 
-  return analytics;
+    // Group by status
+    if (!statusStats[order.status]) {
+      statusStats[order.status] = 0;
+    }
+    statusStats[order.status] += 1;
+
+    // Group by month
+    const orderDate = new Date(order.createdAt);
+    const monthKey = orderDate.toLocaleDateString('ru-RU', { year: 'numeric', month: 'short' });
+    if (!monthlyStats[monthKey]) {
+      monthlyStats[monthKey] = { volume: 0, earnings: 0, co2Saved: 0 };
+    }
+    monthlyStats[monthKey].volume += order.volume;
+    monthlyStats[monthKey].earnings += order.price;
+    monthlyStats[monthKey].co2Saved += order.environmentalImpact;
+  });
+
+  // Convert to frontend format
+  const monthlyData = Object.entries(monthlyStats).map(([month, data]) => ({
+    month,
+    volume: data.volume,
+    earnings: data.earnings,
+    co2Saved: data.co2Saved,
+  }));
+
+  const materialBreakdown = Object.entries(materialStats).map(([material, volume]) => ({
+    material,
+    volume,
+    percentage: totalVolume > 0 ? (volume / totalVolume) * 100 : 0,
+  }));
+
+  const orderStatusBreakdown = Object.entries(statusStats).map(([status, count]) => ({
+    status,
+    count,
+  }));
+
+  return {
+    totalOrders,
+    totalVolume,
+    totalEarnings,
+    totalCO2Saved,
+    monthlyData,
+    materialBreakdown,
+    orderStatusBreakdown,
+  };
+}
+
+// Advanced Analytics
+export async function getAdvancedAnalytics(authContext?: any): Promise<any> {
+  const auth = authContext || await getAuth();
+  if (!auth.userId) {
+    throw new Error("Not authenticated");
+  }
+  
+  try {
+    // Получаем расширенную аналитику из сервиса
+    const analytics = await analyticsService.getAdvancedAnalytics(auth);
+    return analytics;
+  } catch (error) {
+    console.error('Ошибка при получении расширенной аналитики:', error);
+    
+    // Возвращаем заглушку в случае ошибки
+    return {
+      userId: auth.userId,
+      kpiData: {
+        totalExpenses: 0,
+        totalSavings: 0,
+        totalVolume: 0,
+        qualityScore: 0,
+        co2Reduction: 0,
+        avgDeliveryTime: 0
+      },
+      procurementData: [],
+      materialAnalysis: [],
+      costSavingsData: [],
+      qualityData: [],
+      ecoImpactData: [],
+      supplierData: [],
+      demandForecast: [],
+      generatedAt: new Date()
+    };
+  }
 }
 
 // Admin functions
-export async function getAllOrders(): Promise<Order[]> {
-  const auth = await getAuth();
+export async function getAllOrders(authContext?: any): Promise<Order[]> {
+  const auth = authContext || await getAuth();
   if (auth.status !== "authenticated") throw new Error("Not authenticated");
 
   // Verify admin status
@@ -430,8 +670,8 @@ export async function getAllOrders(): Promise<Order[]> {
 export async function getMonthlyFinancialReport(params: {
   month: number;
   year: number;
-}): Promise<FinancialReport> {
-  const auth = await getAuth();
+}, authContext?: any): Promise<FinancialReport> {
+  const auth = authContext || await getAuth();
   if (!auth.userId) {
     throw new Error("Not authenticated");
   }
@@ -481,8 +721,8 @@ export async function getMonthlyFinancialReport(params: {
 
 export async function getYearlyFinancialReports(params: {
   year: number;
-}): Promise<FinancialReport[]> {
-  const auth = await getAuth();
+}, authContext?: any): Promise<FinancialReport[]> {
+  const auth = authContext || await getAuth();
   if (!auth.userId) {
     throw new Error("Not authenticated");
   }
@@ -554,8 +794,8 @@ export async function getYearlyFinancialReports(params: {
 export async function updatePaymentStatus(paymentData: {
   orderId: string;
   status: string;
-}): Promise<Order> {
-  const auth = await getAuth();
+}, authContext?: any): Promise<Order> {
+  const auth = authContext || await getAuth();
   if (!auth.userId) {
     throw new Error("Not authenticated");
   }
@@ -592,6 +832,229 @@ export async function updatePaymentStatus(paymentData: {
   return updatedOrder;
 }
 
+// Notification Management
+/**
+ * Отправка уведомления
+ */
+export async function sendNotification(input: {
+  userId: string;
+  type: 'email' | 'sms' | 'push' | 'telegram' | 'whatsapp' | 'in-app';
+  title: string;
+  message: string;
+  priority?: 'low' | 'medium' | 'high' | 'urgent';
+  category?: 'order' | 'payment' | 'delivery' | 'system' | 'marketing' | 'analytics';
+  scheduledFor?: Date;
+}): Promise<{ notificationId: string }> {
+  const auth = await getAuth();
+  if (auth.status !== "authenticated") throw new Error("Not authenticated");
+
+  // Проверяем права администратора для системных уведомлений
+  if (input.category === 'system' || input.category === 'marketing') {
+    const user = await db.user.findUnique({
+      where: { id: auth.userId },
+    });
+    if (!user?.isAdmin) throw new Error("Not authorized");
+  }
+  // Получаем контактную информацию пользователя
+  const contactInfo = await notificationPreferencesService.getUserContactInfo(input.userId);
+  const notificationResult = await enhancedNotificationService.queueNotification({
+    userId: input.userId,
+    type: input.type,
+    title: input.title,
+    message: input.message,
+    scheduledFor: input.scheduledFor
+  });
+
+  return { notificationId: notificationResult.notificationId };
+}
+
+/**
+ * Отправка уведомления по шаблону
+ */
+export async function sendNotificationFromTemplate(input: {
+  templateId: string;
+  userId: string;
+  variables: Record<string, string>;
+  scheduledFor?: Date;
+}): Promise<{ notificationId: string }> {
+  const auth = await getAuth();
+  if (auth.status !== "authenticated") throw new Error("Not authenticated");  const result = await enhancedNotificationService.sendNotificationFromTemplate(
+    input.templateId,
+    input.userId,
+    input.variables
+  );
+
+  return { notificationId: result.notificationId };
+}
+
+/**
+ * Массовая отправка уведомлений
+ */
+export async function sendBulkNotifications(input: {
+  userIds: string[];
+  templateId: string;
+  variables: Record<string, string>;
+}): Promise<{ notificationIds: string[] }> {
+  const auth = await getAuth();
+  if (auth.status !== "authenticated") throw new Error("Not authenticated");
+
+  // Проверяем права администратора
+  const user = await db.user.findUnique({
+    where: { id: auth.userId },
+  });
+  if (!user?.isAdmin) throw new Error("Not authorized");
+  const result = await enhancedNotificationService.sendBulkNotifications(
+    input.userIds,
+    input.templateId,
+    input.variables
+  );
+
+  return { notificationIds: result.notificationIds };
+}
+
+/**
+ * Получение настроек уведомлений пользователя
+ */
+export async function getUserNotificationSettings() {
+  const auth = await getAuth();
+  if (auth.status !== "authenticated") throw new Error("Not authenticated");
+
+  const settings = await notificationPreferencesService.getUserSettings(auth.userId);
+  return settings;
+}
+
+/**
+ * Обновление настроек уведомлений
+ */
+export async function updateNotificationPreferences(input: {
+  email?: boolean;
+  sms?: boolean;
+  push?: boolean;
+  telegram?: boolean;
+  whatsapp?: boolean;
+  inApp?: boolean;
+  categories?: {
+    order?: boolean;
+    payment?: boolean;
+    delivery?: boolean;
+    system?: boolean;
+    marketing?: boolean;
+    analytics?: boolean;
+  };
+  quietHours?: {
+    enabled: boolean;
+    start: string;
+    end: string;
+    timezone: string;
+  };
+}) {
+  const auth = await getAuth();
+  if (auth.status !== "authenticated") throw new Error("Not authenticated");
+
+  // Convert partial input to proper format with defaults
+  const updateData: any = { ...input };
+  if (input.categories) {
+    updateData.categories = {
+      order: input.categories.order ?? true,
+      payment: input.categories.payment ?? true,
+      delivery: input.categories.delivery ?? true,
+      system: input.categories.system ?? true,
+      marketing: input.categories.marketing ?? true,
+      analytics: input.categories.analytics ?? true,
+    };
+  }
+
+  await notificationPreferencesService.updateNotificationPreferences(auth.userId, updateData);
+  return { success: true };
+}
+
+/**
+ * Подключение Telegram
+ */
+export async function connectTelegram(input: { chatId: string; username?: string }) {
+  const auth = await getAuth();
+  if (auth.status !== "authenticated") throw new Error("Not authenticated");
+
+  await notificationPreferencesService.connectTelegram(auth.userId, input.chatId, input.username);
+  return { success: true };
+}
+
+/**
+ * Подписка на Web Push уведомления
+ */
+export async function subscribeWebPush(input: { subscription: any }) {
+  const auth = await getAuth();
+  if (auth.status !== "authenticated") throw new Error("Not authenticated");
+
+  await notificationPreferencesService.subscribeWebPush(auth.userId, input.subscription);
+  return { success: true };
+}
+
+/**
+ * Отписка от Web Push уведомлений
+ */
+export async function unsubscribeWebPush(input?: { endpoint: string }) {
+  const auth = await getAuth();
+  if (auth.status !== "authenticated") throw new Error("Not authenticated");
+
+  await notificationPreferencesService.unsubscribeWebPush(auth.userId, input?.endpoint);
+  return { success: true };
+}
+
+/**
+ * Верификация email
+ */
+export async function verifyNotificationEmail(input: { email: string }) {
+  const auth = await getAuth();
+  if (auth.status !== "authenticated") throw new Error("Not authenticated");
+
+  await notificationPreferencesService.verifyEmail(auth.userId, input.email);
+  return { success: true };
+}
+
+/**
+ * Верификация телефона
+ */
+export async function verifyNotificationPhone(input: { phoneNumber: string }) {
+  const auth = await getAuth();
+  if (auth.status !== "authenticated") throw new Error("Not authenticated");
+
+  await notificationPreferencesService.verifyPhone(auth.userId, input.phoneNumber);
+  return { success: true };
+}
+
+/**
+ * Получение истории уведомлений
+ */
+export async function getNotificationHistory(options?: { page?: number; limit?: number; status?: string; type?: string; userId?: string; }) {
+  const auth = await getAuth();
+  if (auth.status !== "authenticated") throw new Error("Not authenticated");
+  const historyOptions = options || {};
+  const history = await enhancedNotificationService.getNotificationHistory({
+    userId: auth.userId,
+    ...historyOptions
+  });
+  return history;
+}
+
+/**
+ * Получение статистики уведомлений
+ */
+export async function getNotificationStats() {
+  const auth = await getAuth();
+  if (auth.status !== "authenticated") throw new Error("Not authenticated");
+  const stats = await enhancedNotificationService.getNotificationStats(auth.userId);
+  return stats;
+}
+
+/**
+ * Отписка от всех уведомлений по токену
+ */
+export async function unsubscribeByToken(input: { token: string }) {
+  const success = await notificationPreferencesService.unsubscribeByToken(input.token);
+  return { success };
+}
+
 // Helper type for accumulated analytics
 interface AnalyticsAccumulator {
   totalOrders: number;
@@ -601,4 +1064,485 @@ interface AnalyticsAccumulator {
   ordersByStatus: Record<string, number>;
   monthlyEarnings: number[];
   yearlyVolume: Record<number, number>;
+}
+
+// Get all customers for admin/manager users
+export async function getAllCustomers(authContext?: any): Promise<any[]> {
+  const auth = authContext || await getAuth();
+  if (!auth.userId) {
+    throw new Error("Not authenticated");
+  }
+
+  // Verify admin/manager status
+  const user = await db.user.findUnique({
+    where: { id: auth.userId },
+  });
+  
+  if (!user?.isAdmin && user?.role !== 'manager') {
+    throw new Error("Not authorized - admin or manager privileges required");
+  }
+  try {
+    // Get all users with their order statistics
+    const users = await db.user.findMany({
+      where: {
+        isAdmin: false, // Exclude admin users from customer list
+      },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        companyName: true,
+        createdAt: true,
+      }
+    });
+
+    // Get orders for all users separately
+    const allOrders = await db.order.findMany({
+      select: {
+        id: true,
+        userId: true,
+        volume: true,
+        price: true,
+        createdAt: true,
+        status: true,
+      }
+    });
+
+    // Transform users data to include statistics
+    const customers = users.map(user => {
+      const orders = allOrders.filter(order => order.userId === user.id);
+      const totalOrders = orders.length;
+      const totalVolume = orders.reduce((sum, order) => sum + order.volume, 0);
+      const totalRevenue = orders.reduce((sum, order) => sum + order.price, 0);
+      const lastOrder = orders.length > 0 
+        ? orders.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0]
+        : null;
+
+      return {
+        id: user.id,
+        name: user.name || user.email,
+        email: user.email,
+        companyName: user.companyName,
+        totalOrders,
+        totalVolume: Math.round(totalVolume * 10) / 10,
+        totalRevenue: Math.round(totalRevenue * 100) / 100,
+        lastOrderDate: lastOrder ? lastOrder.createdAt : null,
+        registrationDate: user.createdAt,
+        status: totalOrders > 0 ? 'active' : 'inactive'
+      };
+    });
+
+    return customers.sort((a, b) => b.totalRevenue - a.totalRevenue);
+  } catch (error) {
+    console.error('Error fetching customers:', error);
+    throw new Error('Failed to fetch customers data');
+  }
+}
+
+// Warehouse Management API Methods
+export async function getInventoryItems(authContext?: any): Promise<InventoryItem[]> {
+  const auth = authContext || await getAuth();
+  if (auth.status !== "authenticated") throw new Error("Not authenticated");
+  
+  // Verify warehouse manager or admin role
+  const user = await db.user.findUnique({
+    where: { id: auth.userId },
+  });
+  if (!user?.isAdmin && user?.role !== 'manager') {
+    throw new Error("Warehouse access required");
+  }
+
+  return await db.inventoryItem.findMany({
+    orderBy: { materialType: 'asc' }
+  });
+}
+
+export async function updateInventoryItem(input: {
+  id: string;
+  availableQuantity?: number;
+  reservedQuantity?: number;
+  minThreshold?: number;
+  maxCapacity?: number;
+  location?: string;
+}, authContext?: any): Promise<InventoryItem> {
+  const auth = authContext || await getAuth();
+  if (auth.status !== "authenticated") throw new Error("Not authenticated");
+  
+  const user = await db.user.findUnique({
+    where: { id: auth.userId },
+  });
+  if (!user?.isAdmin && user?.role !== 'manager') {
+    throw new Error("Warehouse access required");
+  }
+
+  return await db.inventoryItem.update({
+    where: { id: input.id },
+    data: {
+      ...input,
+      lastUpdated: new Date()
+    }
+  });
+}
+
+export async function createInventoryItem(input: {
+  materialType: string;
+  availableQuantity: number;
+  location: string;
+  minThreshold: number;
+  maxCapacity: number;
+}, authContext?: any): Promise<InventoryItem> {
+  const auth = authContext || await getAuth();
+  if (auth.status !== "authenticated") throw new Error("Not authenticated");
+  
+  const user = await db.user.findUnique({
+    where: { id: auth.userId },
+  });
+  if (!user?.isAdmin && user?.role !== 'manager') {
+    throw new Error("Warehouse access required");
+  }
+
+  return await db.inventoryItem.create({
+    data: {
+      ...input,
+      reservedQuantity: 0,
+      lastUpdated: new Date()
+    }
+  });
+}
+
+export async function checkInventoryAvailability(materialType: string, requiredQuantity: number): Promise<boolean> {
+  const inventory = await db.inventoryItem.findFirst({
+    where: { materialType }
+  });
+  
+  if (!inventory) return false;
+  
+  const availableForOrder = inventory.availableQuantity - inventory.reservedQuantity;
+  return availableForOrder >= requiredQuantity;
+}
+
+export async function reserveMaterial(input: {
+  materialType: string;
+  quantity: number;
+  orderId: string;
+}): Promise<InventoryItem> {
+  const inventory = await db.inventoryItem.findFirst({
+    where: { materialType: input.materialType }
+  });
+  
+  if (!inventory) {
+    throw new Error(`Material ${input.materialType} not found in inventory`);
+  }
+  
+  const availableForOrder = inventory.availableQuantity - inventory.reservedQuantity;
+  if (availableForOrder < input.quantity) {
+    throw new Error(`Insufficient inventory. Available: ${availableForOrder}, Required: ${input.quantity}`);
+  }
+
+  return await db.inventoryItem.update({
+    where: { id: inventory.id },
+    data: {
+      reservedQuantity: inventory.reservedQuantity + input.quantity,
+      lastUpdated: new Date()
+    }
+  });
+}
+
+// Logistics Route Management API Methods
+export async function getLogisticRoutes(authContext?: any): Promise<LogisticRoute[]> {
+  const auth = authContext || await getAuth();
+  if (auth.status !== "authenticated") throw new Error("Not authenticated");
+  
+  const user = await db.user.findUnique({
+    where: { id: auth.userId },
+  });
+  if (!user?.isAdmin && user?.role !== 'logistic') {
+    throw new Error("Logistics access required");
+  }
+
+  return await db.logisticRoute.findMany({
+    include: {
+      routeOptions: true
+    },
+    orderBy: { createdAt: 'desc' }
+  });
+}
+
+export async function createLogisticRoute(input: {
+  orderId: string;
+  pickupAddress: string;
+  deliveryAddress: string;
+  estimatedDistance: number;
+  routeOptions: {
+    name: string;
+    estimatedCost: number;
+    estimatedTime: number;
+    transportType: string;
+    description?: string;
+  }[];
+}, authContext?: any): Promise<LogisticRoute> {
+  const auth = authContext || await getAuth();
+  if (auth.status !== "authenticated") throw new Error("Not authenticated");
+  
+  const user = await db.user.findUnique({
+    where: { id: auth.userId },
+  });
+  if (!user?.isAdmin && user?.role !== 'logistic') {
+    throw new Error("Logistics access required");
+  }
+
+  return await db.logisticRoute.create({
+    data: {
+      orderId: input.orderId,
+      pickupAddress: input.pickupAddress,
+      deliveryAddress: input.deliveryAddress,
+      estimatedDistance: input.estimatedDistance,
+      status: 'pending',
+      assignedLogisticianId: auth.userId,
+      createdAt: new Date(),
+      routeOptions: {
+        create: input.routeOptions.map(option => ({
+          ...option,
+          isSelected: false
+        }))
+      }
+    },
+    include: {
+      routeOptions: true
+    }
+  });
+}
+
+export async function selectRoute(input: {
+  routeId: string;
+  selectedOptionId: string;
+}, authContext?: any): Promise<LogisticRoute> {
+  const auth = authContext || await getAuth();
+  if (auth.status !== "authenticated") throw new Error("Not authenticated");
+  
+  const user = await db.user.findUnique({
+    where: { id: auth.userId },
+  });
+  if (!user?.isAdmin && user?.role !== 'logistic') {
+    throw new Error("Logistics access required");
+  }
+
+  // Update route status and selected option
+  await db.routeOption.updateMany({
+    where: { logisticRouteId: input.routeId },
+    data: { isSelected: false }
+  });
+
+  await db.routeOption.update({
+    where: { id: input.selectedOptionId },
+    data: { isSelected: true }
+  });
+
+  const updatedRoute = await db.logisticRoute.update({
+    where: { id: input.routeId },
+    data: {
+      status: 'accepted',
+      selectedAt: new Date()
+    },
+    include: {
+      routeOptions: true
+    }
+  });
+  // Update order status to accepted
+  const updatedOrder = await db.order.update({
+    where: { id: updatedRoute.orderId },
+    data: { status: 'accepted' }
+  });
+
+  // Получаем клиента для отправки уведомлений
+  const customer = await db.user.findUnique({
+    where: { id: updatedOrder.userId }
+  });
+
+  // Отправляем уведомление клиенту о том, что логист выбрал маршрут
+  if (customer) {
+    try {
+      // Получаем выбранный вариант маршрута
+      const selectedOption = updatedRoute.routeOptions.find(opt => opt.isSelected);
+      
+      await enhancedNotificationService.sendNotificationFromTemplate(
+        'order-route-selected',
+        customer.id,
+        {
+          orderId: updatedOrder.id,
+          customerName: customer.name || 'Уважаемый клиент',
+          routeName: selectedOption?.name || 'Стандартный маршрут',
+          estimatedDeliveryTime: selectedOption?.estimatedTime?.toString() || 'в ближайшее время',
+          transportType: selectedOption?.transportType || 'Грузовой транспорт',
+          trackingUrl: `${process.env.FRONTEND_URL}/dashboard?tab=orders&order=${updatedOrder.id}`
+        },
+        {
+          userEmail: customer.email,
+          userPhone: undefined,
+          orderId: updatedOrder.id,
+          priority: 'high'
+        }
+      );
+      
+      console.log(`✅ Уведомление об обновлении статуса заказа ${updatedOrder.id} отправлено клиенту ${customer.email}`);
+    } catch (error) {
+      console.error(`❌ Ошибка отправки уведомления клиенту ${customer?.email || 'unknown'}:`, error);
+    }
+  }
+
+  // Generate order documentation
+  await generateOrderDocumentation(updatedRoute.orderId);
+  return updatedRoute;
+}
+
+// Helper function to automatically create logistic routes for new orders
+export async function createAutomaticLogisticRoutes(orderId: string, pickupAddress: string): Promise<void> {
+  try {
+    // Получаем всех логистов
+    const logisticUsers = await getUsersByRole('logistic');
+    
+    if (logisticUsers.length === 0) {
+      console.warn(`⚠️ Нет доступных логистов для заказа ${orderId}`);
+      return;
+    }
+
+    // Создаем различные варианты маршрутов для логистов
+    const routeOptions = [
+      {
+        name: 'Экономичный маршрут',
+        estimatedCost: 1500,
+        estimatedTime: 120, // 2 часа
+        transportType: 'Грузовик (до 3 тонн)',
+        description: 'Оптимальное соотношение цены и времени доставки'
+      },
+      {
+        name: 'Быстрый маршрут',
+        estimatedCost: 2200,
+        estimatedTime: 90, // 1.5 часа
+        transportType: 'Легкий грузовик',
+        description: 'Ускоренная доставка в приоритетном порядке'
+      },
+      {
+        name: 'Стандартный маршрут',
+        estimatedCost: 1800,
+        estimatedTime: 105, // 1.75 часа
+        transportType: 'Грузовик (до 5 тонн)',
+        description: 'Стандартные условия доставки'
+      }
+    ];
+
+    // Создаем логистический маршрут с системным аккаунтом (без аутентификации)
+    const logisticRoute = await db.logisticRoute.create({
+      data: {
+        orderId,
+        pickupAddress,
+        deliveryAddress: 'Будет указан клиентом',
+        estimatedDistance: 25, // базовое расстояние в км
+        status: 'pending',
+        assignedLogisticianId: logisticUsers[0].id, // Назначаем первому доступному логисту
+        createdAt: new Date(),
+        routeOptions: {
+          create: routeOptions.map(option => ({
+            ...option,
+            isSelected: false
+          }))
+        }
+      },
+      include: {
+        routeOptions: true
+      }
+    });
+
+    console.log(`✅ Автоматически создан логистический маршрут ${logisticRoute.id} для заказа ${orderId}`);
+    
+    // Уведомляем всех логистов о новом заказе
+    for (const logist of logisticUsers) {
+      try {
+        await enhancedNotificationService.sendNotificationFromTemplate(
+          'new-order-for-logistics',
+          logist.id,
+          {
+            orderId,
+            pickupAddress,
+            logistName: logist.name || 'Уважаемый логист',
+            routeOptionsCount: routeOptions.length.toString(),
+            dashboardUrl: `${process.env.FRONTEND_URL}/dashboard?tab=logistics&order=${orderId}`
+          },
+          {
+            userEmail: logist.email,
+            userPhone: undefined,
+            orderId,
+            priority: 'high'
+          }
+        );
+        
+        console.log(`✅ Уведомление о новом заказе ${orderId} отправлено логисту ${logist.email}`);
+      } catch (error) {
+        console.error(`❌ Ошибка отправки уведомления логисту ${logist.email}:`, error);
+      }
+    }
+  } catch (error) {
+    console.error(`❌ Ошибка создания автоматических логистических маршрутов для заказа ${orderId}:`, error);
+  }
+}
+
+// Document Generation
+export async function generateOrderDocumentation(orderId: string): Promise<OrderDocument> {
+  const order = await db.order.findUnique({
+    where: { id: orderId },
+    include: {
+      user: true,
+      logisticRoutes: {
+        include: {
+          routeOptions: {
+            where: { isSelected: true }
+          }
+        }
+      }
+    }
+  });
+
+  if (!order) {
+    throw new Error("Order not found");
+  }
+
+  const selectedRoute = order.logisticRoutes.find(r => r.status === 'accepted');
+  const selectedOption = selectedRoute?.routeOptions.find(o => o.isSelected);
+
+  const documentData = {
+    orderId: order.id,
+    documentType: 'DELIVERY_INVOICE' as const,
+    generatedAt: new Date(),
+    customerInfo: {
+      name: order.user.name,
+      email: order.user.email,
+      company: order.user.companyName || 'Частное лицо',
+      address: order.pickupAddress
+    },
+    orderDetails: {
+      materialType: order.materialType,
+      volume: order.volume,
+      price: order.price,
+      environmentalImpact: order.environmentalImpact
+    },
+    logisticsInfo: selectedOption ? {
+      routeName: selectedOption.name,
+      transportType: selectedOption.transportType,
+      estimatedCost: selectedOption.estimatedCost,
+      estimatedTime: selectedOption.estimatedTime,
+      distance: selectedRoute.estimatedDistance
+    } : null,
+    status: 'generated' as const
+  };
+
+  return await db.orderDocument.create({
+    data: documentData
+  });
+}
+
+export async function getOrderDocuments(orderId: string): Promise<OrderDocument[]> {
+  return await db.orderDocument.findMany({
+    where: { orderId },
+    orderBy: { generatedAt: 'desc' }
+  });
 }

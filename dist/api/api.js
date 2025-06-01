@@ -1,4 +1,37 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
     function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
     return new (P || (P = Promise))(function (resolve, reject) {
@@ -41,9 +74,14 @@ const signOut = (token) => __awaiter(void 0, void 0, void 0, function* () {
 });
 exports.signOut = signOut;
 // User Management
-function getCurrentUser() {
+function prismaUserToUser(user) {
+    var _a, _b, _c, _d, _e, _f;
+    return Object.assign(Object.assign({}, user), { role: (_a = user.role) !== null && _a !== void 0 ? _a : undefined, companyName: (_b = user.companyName) !== null && _b !== void 0 ? _b : undefined, inn: (_c = user.inn) !== null && _c !== void 0 ? _c : undefined, kpp: (_d = user.kpp) !== null && _d !== void 0 ? _d : undefined, billingAddress: (_e = user.billingAddress) !== null && _e !== void 0 ? _e : undefined, dashboardSettings: (_f = user.dashboardSettings) !== null && _f !== void 0 ? _f : undefined });
+}
+function getCurrentUser(authContext) {
     return __awaiter(this, void 0, void 0, function* () {
-        const auth = yield (0, actions_1.getAuth)();
+        // Use provided auth context or fall back to getAuth()
+        const auth = authContext || (yield (0, actions_1.getAuth)());
         if (!auth.userId) {
             throw new Error("Not authenticated");
         }
@@ -53,41 +91,34 @@ function getCurrentUser() {
         if (!user) {
             throw new Error("User not found");
         }
-        return user;
+        return prismaUserToUser(user);
     });
 }
-function updateUserProfile(data) {
+function updateUserProfile(data, authContext) {
     return __awaiter(this, void 0, void 0, function* () {
-        const auth = yield (0, actions_1.getAuth)();
+        const auth = authContext || (yield (0, actions_1.getAuth)());
         if (!auth.userId) {
             throw new Error("Not authenticated");
         }
-        return db_1.db.user.update({
+        const user = yield db_1.db.user.update({
             where: { id: auth.userId },
             data,
         });
+        return prismaUserToUser(user);
     });
 }
 // Market Rates
+// TODO: Реализовать через Prisma или убрать, если не используется
 function getMarketRates() {
     return __awaiter(this, void 0, void 0, function* () {
-        return db_1.db.marketRate.findMany();
+        // return db.marketRate.findMany();
+        return [];
     });
 }
 function updateMarketRate(input) {
     return __awaiter(this, void 0, void 0, function* () {
-        const auth = yield (0, actions_1.getAuth)();
-        if (auth.status !== "authenticated")
-            throw new Error("Not authenticated");
-        const user = yield db_1.db.user.findUnique({
-            where: { id: auth.userId },
-        });
-        if (!(user === null || user === void 0 ? void 0 : user.isAdmin))
-            throw new Error("Not authorized");
-        return yield db_1.db.marketRate.updateMany({
-            where: { materialType: input.materialType },
-            data: { pricePerKg: input.pricePerKg },
-        });
+        // TODO: Реализовать через Prisma
+        throw new Error('Not implemented');
     });
 }
 // Order Management
@@ -112,7 +143,8 @@ function getDistanceFromAddress(address) {
     return __awaiter(this, void 0, void 0, function* () {
         try {
             // Используем адрес завода ООО Химка пластик как точку отсчета
-            return yield (0, yandexMaps_1.calculateDistance)(yandexMaps_1.HIMKA_PLASTIC_ADDRESS, address);
+            const distance = yield (0, yandexMaps_1.calculateDistance)(yandexMaps_1.HIMKA_PLASTIC_ADDRESS, address);
+            return distance !== null && distance !== void 0 ? distance : 0; // Возвращаем 0, если undefined
         }
         catch (error) {
             console.error("Failed to calculate distance using Yandex Maps:", error);
@@ -173,39 +205,42 @@ function getFallbackRegion(address) {
 }
 function calculateOrderPrice(orderData) {
     return __awaiter(this, void 0, void 0, function* () {
-        // Get market rate for the material type
-        const materialRate = yield db_1.db.marketRate.findFirst({
-            where: { materialType: orderData.materialType },
+        // Получаем актуальную рыночную цену с биржи вторсырья
+        const { recycleApi } = yield Promise.resolve().then(() => __importStar(require('../utils/recycleApi')));
+        const materialPrice = yield recycleApi.getMaterialPrice(orderData.materialType);
+        console.log(`💰 Расчет цены для ${orderData.materialType}:`, {
+            volume: orderData.volume,
+            materialPrice: materialPrice,
+            address: orderData.pickupAddress
         });
-        if (!materialRate) {
-            throw new Error(`No market rate found for ${orderData.materialType}`);
-        }
-        // Calculate base price
-        const basePrice = orderData.volume * materialRate.pricePerKg;
         // Get distance based on pickup address using Yandex Maps API
         const distance = orderData.distance || (yield getDistanceFromAddress(orderData.pickupAddress));
-        // Используем фиксированную ставку 63 рубля за км для расчета логистики
-        const LOGISTICS_COST_PER_KM = 63;
-        const logisticsCost = distance * LOGISTICS_COST_PER_KM;
-        // Get region from address using Yandex Maps API
+        // Гарантируем неотрицательные значения
+        const safeVolume = Math.max(0, orderData.volume);
+        const safeDistance = Math.max(0, distance);
+        // Константы для расчета согласно ТЗ
+        const LOGISTICS_COST_PER_KM = 70; // Ld = 70 рублей (константа)
+        const customsDuty = 200; // Tc - таможенные пошлины
+        const environmentalTaxRate = 0.5; // Me - экологический налог
         const region = yield (0, yandexMaps_1.getRegionFromAddress)(orderData.pickupAddress);
-        // Get regional taxes and duties
-        const regionalTaxes = yield db_1.db.regionalTax.findFirst({
-            where: { region },
-        });
-        const customsDuty = (regionalTaxes === null || regionalTaxes === void 0 ? void 0 : regionalTaxes.customsDuty) || 200;
-        const environmentalTaxRate = (regionalTaxes === null || regionalTaxes === void 0 ? void 0 : regionalTaxes.environmentalTax) || 0.5;
-        const environmentalTax = orderData.volume * environmentalTaxRate;
-        // Calculate environmental impact (carbon footprint reduction)
-        const environmentalImpact = orderData.volume * 1.5; // 1.5kg CO2 saved per kg recycled
-        // Calculate total price
-        const totalPrice = basePrice - logisticsCost - customsDuty - environmentalTax;
+        const environmentalImpact = safeVolume * 1.5; // 1.5kg CO2 saved per kg recycled
+        // Формула по ТЗ: C = (P_m * V) + (L_d * D) + T_c + M_e
+        // P_m - средняя рыночная стоимость от API бирж
+        // V - объем заказа, введенный пользователем  
+        // L_d - 70 рублей константа
+        // D - расстояние от API Яндекс.Карт
+        const basePrice = safeVolume * materialPrice; // (P_m * V)
+        const logisticsCost = LOGISTICS_COST_PER_KM * safeDistance; // (L_d * D)
+        const environmentalTax = safeVolume * environmentalTaxRate; // M_e
+        let totalPrice = basePrice + logisticsCost + customsDuty + environmentalTax;
+        if (totalPrice < 0)
+            totalPrice = 0;
         return {
             basePrice,
             logisticsCost,
             customsDuty,
             environmentalTax,
-            distance,
+            distance: safeDistance,
             region,
             totalPrice,
             environmentalImpact,
@@ -213,15 +248,15 @@ function calculateOrderPrice(orderData) {
         };
     });
 }
-function createOrder(orderData) {
+function createOrder(orderData, authContext) {
     return __awaiter(this, void 0, void 0, function* () {
-        const auth = yield (0, actions_1.getAuth)();
+        const auth = authContext || (yield (0, actions_1.getAuth)());
         if (!auth.userId) {
             throw new Error("Not authenticated");
         }
         // Calculate price and environmental impact
         const priceCalculation = yield calculateOrderPrice(orderData);
-        // Create the order in database
+        // ВАЖНО: явно указываем все обязательные поля для Prisma
         const order = yield db_1.db.order.create({
             userId: auth.userId,
             materialType: orderData.materialType,
@@ -229,6 +264,7 @@ function createOrder(orderData) {
             pickupAddress: orderData.pickupAddress,
             price: priceCalculation.totalPrice,
             status: "pending",
+            paymentStatus: "unpaid",
             environmentalImpact: priceCalculation.environmentalImpact,
         });
         // Send confirmation email
@@ -245,9 +281,9 @@ function createOrder(orderData) {
         return order;
     });
 }
-function getUserOrders() {
+function getUserOrders(authContext) {
     return __awaiter(this, void 0, void 0, function* () {
-        const auth = yield (0, actions_1.getAuth)();
+        const auth = authContext || (yield (0, actions_1.getAuth)());
         if (!auth.userId) {
             throw new Error("Not authenticated");
         }
@@ -257,9 +293,9 @@ function getUserOrders() {
         return orders;
     });
 }
-function getOrderById(input) {
+function getOrderById(input, authContext) {
     return __awaiter(this, void 0, void 0, function* () {
-        const auth = yield (0, actions_1.getAuth)();
+        const auth = authContext || (yield (0, actions_1.getAuth)());
         if (auth.status !== "authenticated")
             throw new Error("Not authenticated");
         const order = yield db_1.db.order.findUnique({
@@ -293,41 +329,49 @@ function updateOrderStatus(input) {
             where: { id: input.id },
             data: { status: input.status },
         });
-        // Send status update email to customer
-        try {
-            const customer = yield db_1.db.user.findUnique({ where: { id: order.userId } });
-            if (customer === null || customer === void 0 ? void 0 : customer.email) {
+        // Получаем данные клиента для отправки уведомлений
+        const customer = yield db_1.db.user.findUnique({
+            where: { id: order.userId }
+        });
+        if (customer === null || customer === void 0 ? void 0 : customer.email) {
+            // Отправляем уведомления через новую систему
+            const { notificationService } = yield Promise.resolve().then(() => __importStar(require('../utils/notifications')));
+            yield notificationService.sendOrderStatusNotification(order.id, input.status, customer.email);
+            // Дублируем старую систему email для совместимости
+            try {
                 yield (0, actions_1.sendEmail)({
                     to: customer.email,
-                    subject: `Order Status Update - ${input.status.toUpperCase()}`,
+                    subject: `Обновление статуса заказа - ${input.status.toUpperCase()}`,
                     text: `
-# Order Status Update
+# Обновление статуса заказа
 
-Your order status has been updated.
+Статус вашего заказа был обновлен.
 
-## Order Details
-- Order ID: ${order.id}
-- New Status: ${order.status.toUpperCase()}
-- Material: ${order.materialType}
-- Volume: ${order.volume} kg
+## Детали заказа
+- ID заказа: ${order.id}
+- Новый статус: ${order.status.toUpperCase()}
+- Материал: ${order.materialType}
+- Объём: ${order.volume} кг
+- Стоимость: ₽${order.price.toFixed(2)}
 
-You can view more details in your dashboard.
+Вы можете просмотреть подробную информацию в личном кабинете.
 
-Thank you for choosing EcoTrack!
+Спасибо за выбор EcoTrack!
         `,
                 });
             }
+            catch (error) {
+                console.error("Ошибка отправки дублирующего email:", error);
+            }
         }
-        catch (error) {
-            console.error("Failed to send status update email:", error);
-        }
+        console.log(`✅ Статус заказа ${order.id} обновлён на "${input.status}"`);
         return order;
     });
 }
 // Analytics
-function getUserAnalytics() {
+function getUserAnalytics(authContext) {
     return __awaiter(this, void 0, void 0, function* () {
-        const auth = yield (0, actions_1.getAuth)();
+        const auth = authContext || (yield (0, actions_1.getAuth)());
         if (!auth.userId) {
             throw new Error("Not authenticated");
         }
@@ -337,59 +381,78 @@ function getUserAnalytics() {
         if (orders.length === 0) {
             return {
                 totalOrders: 0,
+                totalVolume: 0,
                 totalEarnings: 0,
-                totalEnvironmentalImpact: 0,
-                recycledByMaterial: {},
-                ordersByStatus: {},
-                monthlyEarnings: Array(12).fill(0),
-                yearlyVolume: {},
+                totalCO2Saved: 0,
+                monthlyData: [],
+                materialBreakdown: [],
+                orderStatusBreakdown: [],
             };
         }
         // Calculate analytics from orders
-        const analytics = orders.reduce((acc, order) => {
-            // Increment total orders
-            acc.totalOrders += 1;
-            // Add to total earnings
-            acc.totalEarnings += order.price;
-            // Add to total environmental impact
-            acc.totalEnvironmentalImpact += order.environmentalImpact;
+        const materialStats = {};
+        const statusStats = {};
+        const monthlyStats = {};
+        let totalOrders = 0;
+        let totalVolume = 0;
+        let totalEarnings = 0;
+        let totalCO2Saved = 0;
+        orders.forEach(order => {
+            totalOrders += 1;
+            totalVolume += order.volume;
+            totalEarnings += order.price;
+            totalCO2Saved += order.environmentalImpact;
             // Group by material type
-            if (!acc.recycledByMaterial[order.materialType]) {
-                acc.recycledByMaterial[order.materialType] = 0;
+            if (!materialStats[order.materialType]) {
+                materialStats[order.materialType] = 0;
             }
-            acc.recycledByMaterial[order.materialType] += order.volume;
+            materialStats[order.materialType] += order.volume;
             // Group by status
-            if (!acc.ordersByStatus[order.status]) {
-                acc.ordersByStatus[order.status] = 0;
+            if (!statusStats[order.status]) {
+                statusStats[order.status] = 0;
             }
-            acc.ordersByStatus[order.status] += 1;
-            // Add to monthly earnings (by creation date)
+            statusStats[order.status] += 1;
+            // Group by month
             const orderDate = new Date(order.createdAt);
-            const month = orderDate.getMonth();
-            acc.monthlyEarnings[month] += order.price;
-            // Add to yearly volume
-            const year = orderDate.getFullYear();
-            if (!acc.yearlyVolume[year]) {
-                acc.yearlyVolume[year] = 0;
+            const monthKey = orderDate.toLocaleDateString('ru-RU', { year: 'numeric', month: 'short' });
+            if (!monthlyStats[monthKey]) {
+                monthlyStats[monthKey] = { volume: 0, earnings: 0, co2Saved: 0 };
             }
-            acc.yearlyVolume[year] += order.volume;
-            return acc;
-        }, {
-            totalOrders: 0,
-            totalEarnings: 0,
-            totalEnvironmentalImpact: 0,
-            recycledByMaterial: {},
-            ordersByStatus: {},
-            monthlyEarnings: Array(12).fill(0),
-            yearlyVolume: {},
+            monthlyStats[monthKey].volume += order.volume;
+            monthlyStats[monthKey].earnings += order.price;
+            monthlyStats[monthKey].co2Saved += order.environmentalImpact;
         });
-        return analytics;
+        // Convert to frontend format
+        const monthlyData = Object.entries(monthlyStats).map(([month, data]) => ({
+            month,
+            volume: data.volume,
+            earnings: data.earnings,
+            co2Saved: data.co2Saved,
+        }));
+        const materialBreakdown = Object.entries(materialStats).map(([material, volume]) => ({
+            material,
+            volume,
+            percentage: totalVolume > 0 ? (volume / totalVolume) * 100 : 0,
+        }));
+        const orderStatusBreakdown = Object.entries(statusStats).map(([status, count]) => ({
+            status,
+            count,
+        }));
+        return {
+            totalOrders,
+            totalVolume,
+            totalEarnings,
+            totalCO2Saved,
+            monthlyData,
+            materialBreakdown,
+            orderStatusBreakdown,
+        };
     });
 }
 // Admin functions
-function getAllOrders() {
+function getAllOrders(authContext) {
     return __awaiter(this, void 0, void 0, function* () {
-        const auth = yield (0, actions_1.getAuth)();
+        const auth = authContext || (yield (0, actions_1.getAuth)());
         if (auth.status !== "authenticated")
             throw new Error("Not authenticated");
         // Verify admin status
@@ -405,9 +468,9 @@ function getAllOrders() {
     });
 }
 // Financial Reports
-function getMonthlyFinancialReport(params) {
+function getMonthlyFinancialReport(params, authContext) {
     return __awaiter(this, void 0, void 0, function* () {
-        const auth = yield (0, actions_1.getAuth)();
+        const auth = authContext || (yield (0, actions_1.getAuth)());
         if (!auth.userId) {
             throw new Error("Not authenticated");
         }
@@ -449,9 +512,9 @@ function getMonthlyFinancialReport(params) {
         };
     });
 }
-function getYearlyFinancialReports(params) {
+function getYearlyFinancialReports(params, authContext) {
     return __awaiter(this, void 0, void 0, function* () {
-        const auth = yield (0, actions_1.getAuth)();
+        const auth = authContext || (yield (0, actions_1.getAuth)());
         if (!auth.userId) {
             throw new Error("Not authenticated");
         }
@@ -510,9 +573,9 @@ function getYearlyFinancialReports(params) {
         return reports;
     });
 }
-function updatePaymentStatus(paymentData) {
+function updatePaymentStatus(paymentData, authContext) {
     return __awaiter(this, void 0, void 0, function* () {
-        const auth = yield (0, actions_1.getAuth)();
+        const auth = authContext || (yield (0, actions_1.getAuth)());
         if (!auth.userId) {
             throw new Error("Not authenticated");
         }

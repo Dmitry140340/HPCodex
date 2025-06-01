@@ -49,11 +49,64 @@ export interface Order {
   volume: number;
   pickupAddress: string;
   price: number;
-  status: string;
-  paymentStatus?: string;
   environmentalImpact: number;
-  createdAt: Date | string;
-  updatedAt?: Date | string;
+  status: string;
+  paymentStatus: string;
+  paymentMethod: string;
+  createdAt: Date;
+  updatedAt: Date;
+  invoiceNumber?: string;
+}
+
+// Новые типы для складского управления и логистики
+export interface InventoryItem {
+  id: string;
+  materialType: string;
+  availableQuantity: number;
+  reservedQuantity: number;
+  location: string;
+  lastUpdated: Date | string;
+  minThreshold: number;
+  maxCapacity: number;
+}
+
+export interface LogisticRoute {
+  id: string;
+  orderId: string;
+  fromAddress: string;
+  toAddress: string;
+  distance: number;
+  estimatedTime: number; // в минутах
+  cost: number;
+  routePoints: Array<{lat: number, lng: number}>;
+  status: 'proposed' | 'selected' | 'in_progress' | 'completed';
+  createdBy: string; // ID логиста
+  selectedAt?: Date | string;
+  routeOptions?: RouteOption[];
+}
+
+export interface RouteOption {
+  id: string;
+  name: string;
+  estimatedCost: number;
+  estimatedTime: number; // в минутах
+  transportType: string;
+  description?: string;
+  isSelected: boolean;
+  // Legacy properties для совместимости
+  distance?: number;
+  duration?: number;
+  cost?: number;
+  routeType?: 'fastest' | 'shortest' | 'economic';
+}
+
+export interface OrderDocument {
+  id: string;
+  orderId: string;
+  type: 'invoice' | 'delivery_receipt' | 'quality_certificate' | 'eco_certificate';
+  fileName: string;
+  fileUrl: string;
+  generatedAt: Date | string;
 }
 
 export interface MarketRate {

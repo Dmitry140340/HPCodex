@@ -62,11 +62,22 @@ app.use(express_1.default.json());
 app.use((0, morgan_1.default)('dev'));
 // Authentication middleware
 const authMiddleware = (req, res, next) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a;
     try {
-        const token = (_a = req.headers.authorization) === null || _a === void 0 ? void 0 : _a.split(' ')[1];
+        // Получаем токен из заголовка
+        let token = req.headers.authorization;
+        // Проверяем наличие заголовка
+        if (!token) {
+            console.error('Отсутствует заголовок Authorization');
+            return res.status(401).json({ error: 'Authentication required' });
+        }
+        // Если токен в формате "Bearer token", извлекаем сам токен
+        if (token.startsWith('Bearer ')) {
+            token = token.split(' ')[1];
+        }
+        console.log('Получен токен авторизации:', token);
         const auth = yield (0, actions_1.getAuth)(token);
         if (auth.status !== 'authenticated') {
+            console.error('Токен не прошел проверку, статус:', auth.status);
             return res.status(401).json({ error: 'Authentication required' });
         }
         // Attach user info to request
@@ -80,11 +91,22 @@ const authMiddleware = (req, res, next) => __awaiter(void 0, void 0, void 0, fun
 });
 // Admin middleware
 const adminMiddleware = (req, res, next) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a;
     try {
-        const token = (_a = req.headers.authorization) === null || _a === void 0 ? void 0 : _a.split(' ')[1];
+        // Получаем токен из заголовка
+        let token = req.headers.authorization;
+        // Проверяем наличие заголовка
+        if (!token) {
+            console.error('Отсутствует заголовок Authorization');
+            return res.status(401).json({ error: 'Authentication required' });
+        }
+        // Если токен в формате "Bearer token", извлекаем сам токен
+        if (token.startsWith('Bearer ')) {
+            token = token.split(' ')[1];
+        }
+        console.log('Получен токен авторизации для admin:', token);
         const auth = yield (0, actions_1.getAuth)(token);
         if (auth.status !== 'authenticated' || auth.role !== 'admin') {
+            console.error('Токен не прошел проверку на права администратора, статус:', auth.status, 'роль:', auth.role);
             return res.status(403).json({ error: 'Admin privileges required' });
         }
         // Attach user info to request
@@ -137,7 +159,8 @@ app.post('/api/auth/logout', (req, res) => __awaiter(void 0, void 0, void 0, fun
 // User profile
 app.get('/api/profile', authMiddleware, (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const user = yield api.getCurrentUser();
+        const auth = req.auth;
+        const user = yield api.getCurrentUser(auth);
         res.json(user);
     }
     catch (error) {
@@ -153,6 +176,31 @@ app.put('/api/profile', authMiddleware, (req, res) => __awaiter(void 0, void 0, 
     }
     catch (error) {
         console.error('Profile update error:', error);
+        res.status(400).json({ error: error.message || 'Failed to update profile' });
+    }
+}));
+// User info (for frontend compatibility)
+app.get('/api/user/me', authMiddleware, (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const auth = req.auth;
+        const user = yield api.getCurrentUser(auth);
+        res.json(user);
+    }
+    catch (error) {
+        console.error('User me error:', error);
+        res.status(404).json({ error: error.message || 'User not found' });
+    }
+}));
+// Update user profile
+app.put('/api/user/me', authMiddleware, (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const auth = req.auth;
+        const profileData = req.body;
+        const updatedUser = yield api.updateUserProfile(profileData, auth);
+        res.json(updatedUser);
+    }
+    catch (error) {
+        console.error('Update user profile error:', error);
         res.status(400).json({ error: error.message || 'Failed to update profile' });
     }
 }));
@@ -193,7 +241,8 @@ app.post('/api/calculate-price', (req, res) => __awaiter(void 0, void 0, void 0,
 app.post('/api/orders', authMiddleware, (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const orderData = req.body;
-        const order = yield api.createOrder(orderData);
+        const auth = req.auth;
+        const order = yield api.createOrder(orderData, auth);
         res.json(order);
     }
     catch (error) {
@@ -203,7 +252,8 @@ app.post('/api/orders', authMiddleware, (req, res) => __awaiter(void 0, void 0, 
 }));
 app.get('/api/orders', authMiddleware, (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const orders = yield api.getUserOrders();
+        const auth = req.auth;
+        const orders = yield api.getUserOrders(auth);
         res.json(orders);
     }
     catch (error) {
@@ -213,7 +263,8 @@ app.get('/api/orders', authMiddleware, (req, res) => __awaiter(void 0, void 0, v
 }));
 app.get('/api/orders/:id', authMiddleware, (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const order = yield api.getOrderById({ id: req.params.id });
+        const auth = req.auth;
+        const order = yield api.getOrderById({ id: req.params.id }, auth);
         res.json(order);
     }
     catch (error) {
@@ -235,7 +286,7 @@ app.put('/api/orders/:id/status', adminMiddleware, (req, res) => __awaiter(void 
 app.put('/api/orders/:id/payment', authMiddleware, (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { status } = req.body;
-        const order = yield api.updatePaymentStatus({ orderId: req.params.id, status });
+        const order = yield api.updatePaymentStatus({ orderId: req.params.id, status }, req.auth);
         res.json(order);
     }
     catch (error) {
@@ -246,7 +297,7 @@ app.put('/api/orders/:id/payment', authMiddleware, (req, res) => __awaiter(void 
 // Analytics
 app.get('/api/analytics', authMiddleware, (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const analytics = yield api.getUserAnalytics();
+        const analytics = yield api.getUserAnalytics(req.auth);
         res.json(analytics);
     }
     catch (error) {
@@ -258,7 +309,7 @@ app.get('/api/analytics', authMiddleware, (req, res) => __awaiter(void 0, void 0
 app.get('/api/financial-reports/yearly/:year', authMiddleware, (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const year = parseInt(req.params.year);
-        const reports = yield api.getYearlyFinancialReports({ year });
+        const reports = yield api.getYearlyFinancialReports({ year }, req.auth);
         res.json(reports);
     }
     catch (error) {
@@ -270,7 +321,7 @@ app.get('/api/financial-reports/monthly/:year/:month', authMiddleware, (req, res
     try {
         const year = parseInt(req.params.year);
         const month = parseInt(req.params.month);
-        const report = yield api.getMonthlyFinancialReport({ year, month });
+        const report = yield api.getMonthlyFinancialReport({ year, month }, req.auth);
         res.json(report);
     }
     catch (error) {
@@ -281,12 +332,98 @@ app.get('/api/financial-reports/monthly/:year/:month', authMiddleware, (req, res
 // Admin routes
 app.get('/api/admin/orders', adminMiddleware, (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const orders = yield api.getAllOrders();
+        const orders = yield api.getAllOrders(req.auth);
         res.json(orders);
     }
     catch (error) {
         console.error('Admin orders error:', error);
         res.status(400).json({ error: error.message || 'Failed to get all orders' });
+    }
+}));
+// Административная аналитика
+app.get('/api/admin/analytics', adminMiddleware, (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { getAdminAnalytics } = require('../controllers/adminController');
+        yield getAdminAnalytics(req, res);
+    }
+    catch (error) {
+        console.error('Admin analytics error:', error);
+        res.status(400).json({ error: error.message || 'Failed to get admin analytics' });
+    }
+}));
+// Управление правилами ценообразования
+app.get('/api/admin/pricing/rules', adminMiddleware, (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { getPricingRules } = require('../controllers/adminController');
+        yield getPricingRules(req, res);
+    }
+    catch (error) {
+        console.error('Pricing rules error:', error);
+        res.status(400).json({ error: error.message || 'Failed to get pricing rules' });
+    }
+}));
+app.put('/api/admin/pricing/rules/:id', adminMiddleware, (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { updatePricingRule } = require('../controllers/adminController');
+        yield updatePricingRule(req, res);
+    }
+    catch (error) {
+        console.error('Update pricing rule error:', error);
+        res.status(400).json({ error: error.message || 'Failed to update pricing rule' });
+    }
+}));
+// Управление тарифными настройками
+app.get('/api/admin/pricing/tariffs', adminMiddleware, (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { getTariffSettings } = require('../controllers/adminController');
+        yield getTariffSettings(req, res);
+    }
+    catch (error) {
+        console.error('Tariff settings error:', error);
+        res.status(400).json({ error: error.message || 'Failed to get tariff settings' });
+    }
+}));
+// Управление KPI
+app.put('/api/admin/kpi/:id', adminMiddleware, (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { updateKPITarget } = require('../controllers/adminController');
+        yield updateKPITarget(req, res);
+    }
+    catch (error) {
+        console.error('Update KPI error:', error);
+        res.status(400).json({ error: error.message || 'Failed to update KPI target' });
+    }
+}));
+// Управление пользователями
+app.put('/api/admin/users/:userId/role', adminMiddleware, (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { updateUserRole } = require('../controllers/adminController');
+        yield updateUserRole(req, res);
+    }
+    catch (error) {
+        console.error('Update user role error:', error);
+        res.status(400).json({ error: error.message || 'Failed to update user role' });
+    }
+}));
+// Системные настройки
+app.get('/api/admin/settings', adminMiddleware, (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { getSystemSettings } = require('../controllers/adminController');
+        yield getSystemSettings(req, res);
+    }
+    catch (error) {
+        console.error('System settings error:', error);
+        res.status(400).json({ error: error.message || 'Failed to get system settings' });
+    }
+}));
+app.put('/api/admin/settings', adminMiddleware, (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { updateSystemSettings } = require('../controllers/adminController');
+        yield updateSystemSettings(req, res);
+    }
+    catch (error) {
+        console.error('Update system settings error:', error);
+        res.status(400).json({ error: error.message || 'Failed to update system settings' });
     }
 }));
 // Yandex Maps API
@@ -297,6 +434,12 @@ app.get('/api/maps/config', (req, res) => {
         scriptUrl: `https://api-maps.yandex.ru/v3/?apikey=${apiKey}&lang=ru_RU`
     });
 });
+// DEV ONLY: List all sessions (for debugging auth issues)
+if (process.env.NODE_ENV === 'development') {
+    app.get('/api/sessions', (req, res) => {
+        res.json(actions_1.sessions);
+    });
+}
 // Error handling middleware
 app.use((err, req, res, next) => {
     console.error('Server error:', err);

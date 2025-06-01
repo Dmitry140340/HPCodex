@@ -24,11 +24,21 @@ const sessions: Session[] = [
     token: "admin-token-for-development",
     expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours from now
     role: 'admin'
+  },
+  {
+    userId: "logist-1",
+    token: "logist-token-for-development",
+    expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours from now
+    role: 'logistic'
   }
 ];
 
 // Authentication actions
 export const getAuth = async (token?: string) => {
+  console.log('getAuth called with token:', token);
+  console.log('Current sessions count:', sessions.length);
+  console.log('Sessions:', sessions.map(s => ({ userId: s.userId, token: s.token, role: s.role })));
+  
   // For development, return a default authenticated user if no token is provided
   if (!token && process.env.NODE_ENV === 'development') {
     return {
@@ -40,6 +50,7 @@ export const getAuth = async (token?: string) => {
 
   // Find session by token
   const session = sessions.find(s => s.token === token);
+  console.log('Found session:', session ? { userId: session.userId, role: session.role } : 'none');
   
   // Check if session exists and is not expired
   if (session && new Date() < session.expiresAt) {
@@ -77,14 +88,32 @@ export const sendEmail = async (options: {
 };
 
 // Authentication and user management functions
+function prismaUserToUser(user: any): User {
+  return {
+    ...user,
+    role: user.role ?? undefined,
+    companyName: user.companyName ?? undefined,
+    inn: user.inn ?? undefined,
+    kpp: user.kpp ?? undefined,
+    billingAddress: user.billingAddress ?? undefined,
+    dashboardSettings: user.dashboardSettings ?? undefined,
+  };
+}
+
 export const signIn = async (email: string, password: string): Promise<{token: string, user: User, role: string}> => {
-  // In a real app, you would validate credentials against hashed passwords
-  // For now, we'll just check if a user with this email exists
   const user = await db.user.findUnique({
     where: { email }
   });
-  
+
   if (!user) {
+    throw new Error("Invalid credentials");
+  }
+
+  // Проверяем пароль с помощью bcrypt
+  const bcrypt = require('bcryptjs');
+  const isPasswordValid = await bcrypt.compare(password, user.password);
+  
+  if (!isPasswordValid) {
     throw new Error("Invalid credentials");
   }
   
@@ -119,7 +148,7 @@ export const signIn = async (email: string, password: string): Promise<{token: s
   // Add new session
   sessions.push(session);
   
-  return { token, user, role };
+  return { token, user: prismaUserToUser(user), role };
 };
 
 export const signUp = async (userData: {
@@ -128,54 +157,55 @@ export const signUp = async (userData: {
   name: string;
   companyName?: string;
 }): Promise<{token: string, user: User, role: string}> => {
-  // Check if user already exists
-  const existingUser = await db.user.findUnique({
-    where: { email: userData.email }
-  });
-  
-  if (existingUser) {
-    throw new Error("Email already in use");
+  try {
+    // Check if user already exists
+    const existingUser = await db.user.findUnique({
+      where: { email: userData.email }
+    });
+    if (existingUser) {
+      throw new Error("Email already in use");
+    }
+    // Важно: password обязательно должен быть передан!
+    if (!userData.password) {
+      throw new Error("Password is required");
+    }
+    
+    // Хешируем пароль перед сохранением
+    const bcrypt = require('bcryptjs');
+    const hashedPassword = await bcrypt.hash(userData.password, 10);
+    
+    // Determine if user should be admin based on email
+    const isAdminUser = userData.email.endsWith('@admin.com') || userData.email === 'admin@himkaplastic.ru';
+    
+    const newUser = await db.user.create({
+      data: {
+        name: userData.name,
+        email: userData.email,
+        password: hashedPassword, // Используем хешированный пароль
+        companyName: userData.companyName || "",
+        isAdmin: isAdminUser,
+        dashboardSettings: JSON.stringify([
+          { id: 'w1', type: 'totalOrders', position: 0, size: 'small' },
+          { id: 'w2', type: 'totalEarnings', position: 1, size: 'small' },
+          { id: 'w3', type: 'environmentalImpact', position: 2, size: 'small' },
+        ])
+      }
+    });
+    // Generate a token and create session
+    const token = `token_${Math.random().toString(36).substring(2, 15)}`;
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days from now
+    // Determine role based on email domain
+    let role: 'client' | 'manager' | 'logistic' | 'admin' = 'client';
+    if (userData.email.endsWith('@manager.com')) role = 'manager';
+    else if (userData.email.endsWith('@logistic.com')) role = 'logistic';
+    else if (userData.email.endsWith('@admin.com') || userData.email === 'admin@himkaplastic.ru') role = 'admin';
+    const session: Session = { userId: newUser.id, token, expiresAt, role };
+    sessions.push(session);
+    return { token, user: prismaUserToUser(newUser), role };
+  } catch (err) {
+    console.error('Registration error (backend signUp):', err);
+    throw err;
   }
-  
-  // In a real app, you would hash the password before storing
-  // For now, we'll skip password storage for simplicity
-  const newUser = await db.user.create({
-    name: userData.name,
-    email: userData.email,
-    companyName: userData.companyName || "",
-    isAdmin: false,
-    dashboardSettings: JSON.stringify([
-      { id: 'w1', type: 'totalOrders', position: 0, size: 'small' },
-      { id: 'w2', type: 'totalEarnings', position: 1, size: 'small' },
-      { id: 'w3', type: 'environmentalImpact', position: 2, size: 'small' },
-    ])
-  });
-  
-  // Generate a token and create session
-  const token = `token_${Math.random().toString(36).substring(2, 15)}`;
-  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days from now
-  
-  // Determine role based on email domain
-  let role: 'client' | 'manager' | 'logistic' | 'admin' = 'client';
-  if (userData.email.endsWith('@manager.com')) {
-    role = 'manager';
-  } else if (userData.email.endsWith('@logistic.com')) {
-    role = 'logistic';
-  } else if (userData.email.endsWith('@admin.com')) {
-    role = 'admin';
-  }
-  
-  // Create session
-  const session: Session = {
-    userId: newUser.id,
-    token,
-    expiresAt,
-    role
-  };
-  
-  sessions.push(session);
-  
-  return { token, user: newUser, role };
 };
 
 export const signOut = (token: string): void => {
@@ -233,3 +263,5 @@ export const sendSMS = async (phoneNumber: string, message: string) => {
   console.log(`[SMS] Message to ${phoneNumber}: ${message}`);
   return { success: true };
 };
+
+export { sessions };

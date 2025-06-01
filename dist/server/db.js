@@ -9,259 +9,258 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.db = void 0;
-// In-memory data store
-let users = [
+exports.db = exports.prisma = void 0;
+// Заменяем in-memory реализацию db на PrismaClient для работы с PostgreSQL
+const client_1 = require("@prisma/client");
+// Fallback in-memory storage for development
+const inMemoryUsers = [
     {
         id: "user-1",
-        name: "Тестовый Пользователь",
         email: "test@example.com",
-        companyName: "Тест Ком",
-        inn: "1234567890",
-        kpp: "098765432",
-        billingAddress: "г. Тест, ул. Тестовая, д.1",
+        name: "Тестовый Пользователь",
+        password: "password123",
+        isAdmin: false,
+        role: 'client',
+        companyName: "ООО Тест",
+        inn: null,
+        kpp: null,
+        billingAddress: null,
         dashboardSettings: JSON.stringify([
             { id: 'w1', type: 'totalOrders', position: 0, size: 'small' },
             { id: 'w2', type: 'totalEarnings', position: 1, size: 'small' },
             { id: 'w3', type: 'environmentalImpact', position: 2, size: 'small' },
         ]),
-        isAdmin: false,
+        createdAt: new Date(),
+        updatedAt: new Date()
     },
     {
         id: "admin-1",
+        email: "admin@admin.com",
         name: "Администратор",
-        email: "admin@example.com",
-        companyName: "Эко Трэк",
+        password: "admin123",
         isAdmin: true,
+        role: 'admin',
+        companyName: "ООО Химка Пластик",
+        inn: null,
+        kpp: null,
+        billingAddress: null,
         dashboardSettings: JSON.stringify([
-            { id: 'w1', type: 'totalOrders', position: 0, size: 'large' },
+            { id: 'w1', type: 'totalOrders', position: 0, size: 'small' },
             { id: 'w2', type: 'totalEarnings', position: 1, size: 'small' },
+            { id: 'w3', type: 'environmentalImpact', position: 2, size: 'small' },
         ]),
+        createdAt: new Date(),
+        updatedAt: new Date()
     }
 ];
-let orders = [
-    {
-        id: "order-1",
-        userId: "user-1",
-        materialType: "PET",
-        volume: 500,
-        pickupAddress: "г. Москва, ул. Тверская, д.1",
-        price: 12500,
-        status: "completed",
-        paymentStatus: "paid",
-        environmentalImpact: 750,
-        createdAt: new Date("2023-01-10"),
-        updatedAt: new Date("2023-01-15"),
-    },
-    {
-        id: "order-2",
-        userId: "user-1",
-        materialType: "HDPE",
-        volume: 300,
-        pickupAddress: "г. Москва, ул. Ленина, д.15",
-        price: 9000,
-        status: "in_progress",
-        paymentStatus: "pending",
-        environmentalImpact: 450,
-        createdAt: new Date("2023-02-05"),
-        updatedAt: new Date("2023-02-10"),
-    },
-];
-let marketRates = [
-    {
-        id: "rate-1",
-        materialType: "PET",
-        pricePerKg: 25,
-        logisticsCostPerKm: 15
-    },
-    {
-        id: "rate-2",
-        materialType: "HDPE",
-        pricePerKg: 30,
-        logisticsCostPerKm: 17.5
-    },
-];
-let regionalTaxes = [
-    { region: "Москва", environmentalTax: 0.5, customsDuty: 200 },
-    { region: "Санкт-Петербург", environmentalTax: 0.4, customsDuty: 180 },
-    { region: "Екатеринбург", environmentalTax: 0.3, customsDuty: 150 },
-    { region: "Новосибирск", environmentalTax: 0.35, customsDuty: 160 },
-    { region: "По умолчанию", environmentalTax: 0.25, customsDuty: 100 }
-];
-// Инициализация массива финансовых отчетов с примерами данных
-let financialReports = [
-    {
-        id: "report-2023-1",
-        month: 1,
-        year: 2023,
-        totalPaid: 45000,
-        volume: 1800,
-        monthName: 'Январь'
-    },
-    {
-        id: "report-2023-2",
-        month: 2,
-        year: 2023,
-        totalPaid: 38000,
-        volume: 1500,
-        monthName: 'Февраль'
-    }
-];
-// Database interface
+const inMemoryOrders = [];
+exports.prisma = new client_1.PrismaClient();
+// Try to use Prisma, fallback to in-memory if fails
+let usePrisma = true;
 exports.db = {
-    // User operations
     user: {
         findUnique: (query) => __awaiter(void 0, void 0, void 0, function* () {
+            if (usePrisma) {
+                try {
+                    if (query.where.id) {
+                        return yield exports.prisma.user.findUnique({ where: { id: query.where.id } });
+                    }
+                    if (query.where.email) {
+                        return yield exports.prisma.user.findUnique({ where: { email: query.where.email } });
+                    }
+                    return null;
+                }
+                catch (error) {
+                    console.warn('Prisma error, falling back to in-memory storage:', error);
+                    usePrisma = false;
+                }
+            }
+            // Fallback to in-memory
             if (query.where.id) {
-                return users.find(u => u.id === query.where.id) || null;
+                return inMemoryUsers.find(user => user.id === query.where.id) || null;
             }
             if (query.where.email) {
-                return users.find(u => u.email === query.where.email) || null;
+                return inMemoryUsers.find(user => user.email === query.where.email) || null;
             }
             return null;
-        }),
-        findMany: () => __awaiter(void 0, void 0, void 0, function* () {
-            return [...users];
+        }), findMany: () => __awaiter(void 0, void 0, void 0, function* () {
+            if (usePrisma) {
+                try {
+                    return yield exports.prisma.user.findMany();
+                }
+                catch (error) {
+                    console.warn('Prisma error, falling back to in-memory storage:', error);
+                    usePrisma = false;
+                }
+            }
+            return inMemoryUsers;
         }),
         create: (data) => __awaiter(void 0, void 0, void 0, function* () {
-            const newUser = Object.assign(Object.assign({}, data), { id: `user-${Date.now()}` });
-            users.push(newUser);
+            if (usePrisma) {
+                try {
+                    return yield exports.prisma.user.create({ data });
+                }
+                catch (error) {
+                    console.warn('Prisma error, falling back to in-memory storage:', error);
+                    usePrisma = false;
+                }
+            }
+            // Fallback to in-memory
+            const newUser = Object.assign(Object.assign({ id: `user-${Date.now()}` }, data), { createdAt: new Date(), updatedAt: new Date() });
+            inMemoryUsers.push(newUser);
             return newUser;
         }),
         update: (query) => __awaiter(void 0, void 0, void 0, function* () {
-            const userIndex = users.findIndex(u => u.id === query.where.id);
-            if (userIndex === -1) {
-                throw new Error(`User not found: ${query.where.id}`);
+            if (usePrisma) {
+                try {
+                    return yield exports.prisma.user.update({ where: { id: query.where.id }, data: query.data });
+                }
+                catch (error) {
+                    console.warn('Prisma error, falling back to in-memory storage:', error);
+                    usePrisma = false;
+                }
             }
-            users[userIndex] = Object.assign(Object.assign({}, users[userIndex]), query.data);
-            return users[userIndex];
+            // Fallback to in-memory
+            const userIndex = inMemoryUsers.findIndex(user => user.id === query.where.id);
+            if (userIndex !== -1) {
+                inMemoryUsers[userIndex] = Object.assign(Object.assign(Object.assign({}, inMemoryUsers[userIndex]), query.data), { updatedAt: new Date() });
+                return inMemoryUsers[userIndex];
+            }
+            throw new Error('User not found');
         }),
         delete: (query) => __awaiter(void 0, void 0, void 0, function* () {
-            const userIndex = users.findIndex(u => u.id === query.where.id);
-            if (userIndex === -1) {
-                throw new Error(`User not found: ${query.where.id}`);
+            if (usePrisma) {
+                try {
+                    return yield exports.prisma.user.delete({ where: { id: query.where.id } });
+                }
+                catch (error) {
+                    console.warn('Prisma error, falling back to in-memory storage:', error);
+                    usePrisma = false;
+                }
             }
-            const deletedUser = users[userIndex];
-            users.splice(userIndex, 1);
-            return deletedUser;
+            // Fallback to in-memory
+            const userIndex = inMemoryUsers.findIndex(user => user.id === query.where.id);
+            if (userIndex !== -1) {
+                const deletedUser = inMemoryUsers[userIndex];
+                inMemoryUsers.splice(userIndex, 1);
+                return deletedUser;
+            }
+            throw new Error('User not found');
         })
-    },
-    // Order operations
-    order: {
+    }, order: {
         findMany: (query) => __awaiter(void 0, void 0, void 0, function* () {
-            let result = [...orders];
-            if (query && query.where && query.where.userId) {
-                result = result.filter(o => o.userId === query.where.userId);
+            var _a, _b;
+            if (usePrisma) {
+                try {
+                    return yield exports.prisma.order.findMany({
+                        where: query === null || query === void 0 ? void 0 : query.where,
+                        orderBy: query === null || query === void 0 ? void 0 : query.orderBy,
+                        include: query === null || query === void 0 ? void 0 : query.include,
+                    });
+                }
+                catch (error) {
+                    console.warn('Prisma error, falling back to in-memory storage:', error);
+                    usePrisma = false;
+                }
             }
-            if (query && query.orderBy && typeof query.orderBy.createdAt === 'string') {
-                result.sort((a, b) => {
-                    const dateA = new Date(a.createdAt).getTime();
-                    const dateB = new Date(b.createdAt).getTime();
-                    return query.orderBy.createdAt === 'desc' ? dateB - dateA : dateA - dateB;
-                });
+            // Fallback to in-memory
+            let results = [...inMemoryOrders];
+            if ((_a = query === null || query === void 0 ? void 0 : query.where) === null || _a === void 0 ? void 0 : _a.userId) {
+                results = results.filter(order => order.userId === query.where.userId);
             }
-            if (query && query.include && query.include.user) {
-                result = result.map(order => {
-                    const user = users.find(u => u.id === order.userId);
-                    return Object.assign(Object.assign({}, order), { user });
-                });
+            if (((_b = query === null || query === void 0 ? void 0 : query.orderBy) === null || _b === void 0 ? void 0 : _b.createdAt) === 'desc') {
+                results.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
             }
-            return result;
+            return results;
         }),
         findUnique: (query) => __awaiter(void 0, void 0, void 0, function* () {
-            const order = orders.find(o => o.id === query.where.id) || null;
-            return order;
+            if (usePrisma) {
+                try {
+                    return yield exports.prisma.order.findUnique({ where: { id: query.where.id } });
+                }
+                catch (error) {
+                    console.warn('Prisma error, falling back to in-memory storage:', error);
+                    usePrisma = false;
+                }
+            }
+            // Fallback to in-memory
+            return inMemoryOrders.find(order => order.id === query.where.id) || null;
         }),
         create: (data) => __awaiter(void 0, void 0, void 0, function* () {
-            const newOrder = Object.assign(Object.assign({}, data), { id: `order-${Date.now()}`, createdAt: new Date(), updatedAt: new Date() });
-            orders.push(newOrder);
+            if (usePrisma) {
+                try {
+                    return yield exports.prisma.order.create({ data });
+                }
+                catch (error) {
+                    console.warn('Prisma error, falling back to in-memory storage:', error);
+                    usePrisma = false;
+                }
+            }
+            // Fallback to in-memory
+            const newOrder = Object.assign(Object.assign({ id: `order-${Date.now()}` }, data), { createdAt: new Date(), updatedAt: new Date() });
+            inMemoryOrders.push(newOrder);
             return newOrder;
         }),
         update: (query) => __awaiter(void 0, void 0, void 0, function* () {
-            const orderIndex = orders.findIndex(o => o.id === query.where.id);
-            if (orderIndex === -1) {
-                throw new Error(`Order not found: ${query.where.id}`);
+            if (usePrisma) {
+                try {
+                    return yield exports.prisma.order.update({ where: { id: query.where.id }, data: query.data });
+                }
+                catch (error) {
+                    console.warn('Prisma error, falling back to in-memory storage:', error);
+                    usePrisma = false;
+                }
             }
-            orders[orderIndex] = Object.assign(Object.assign(Object.assign({}, orders[orderIndex]), query.data), { updatedAt: new Date() });
-            return orders[orderIndex];
+            // Fallback to in-memory
+            const orderIndex = inMemoryOrders.findIndex(order => order.id === query.where.id);
+            if (orderIndex !== -1) {
+                inMemoryOrders[orderIndex] = Object.assign(Object.assign(Object.assign({}, inMemoryOrders[orderIndex]), query.data), { updatedAt: new Date() });
+                return inMemoryOrders[orderIndex];
+            }
+            throw new Error('Order not found');
         }),
         delete: (query) => __awaiter(void 0, void 0, void 0, function* () {
-            const orderIndex = orders.findIndex(o => o.id === query.where.id);
-            if (orderIndex === -1) {
-                throw new Error(`Order not found: ${query.where.id}`);
-            }
-            const deletedOrder = orders[orderIndex];
-            orders.splice(orderIndex, 1);
-            return deletedOrder;
-        }),
-        updateMany: (query) => __awaiter(void 0, void 0, void 0, function* () {
-            return exports.db.order.update(query);
-        })
-    },
-    // Market rate operations
-    marketRate: {
-        findMany: () => __awaiter(void 0, void 0, void 0, function* () {
-            return [...marketRates];
-        }),
-        findFirst: (query) => __awaiter(void 0, void 0, void 0, function* () {
-            return marketRates.find(r => r.materialType === query.where.materialType) || null;
-        }),
-        updateMany: (query) => __awaiter(void 0, void 0, void 0, function* () {
-            const rateIndex = marketRates.findIndex(r => r.materialType === query.where.materialType);
-            if (rateIndex === -1) {
-                throw new Error(`Market rate not found: ${query.where.materialType}`);
-            }
-            marketRates[rateIndex] = Object.assign(Object.assign({}, marketRates[rateIndex]), query.data);
-            return marketRates[rateIndex];
-        }),
-        createMany: (query) => __awaiter(void 0, void 0, void 0, function* () {
-            const newRates = query.data.map(rate => (Object.assign(Object.assign({}, rate), { id: `rate-${Date.now()}-${Math.floor(Math.random() * 1000)}` })));
-            marketRates.push(...newRates);
-            return newRates;
-        })
-    },
-    // Regional tax operations
-    regionalTax: {
-        findMany: () => __awaiter(void 0, void 0, void 0, function* () {
-            return [...regionalTaxes];
-        }),
-        findFirst: (query) => __awaiter(void 0, void 0, void 0, function* () {
-            return regionalTaxes.find(t => t.region === query.where.region) ||
-                regionalTaxes.find(t => t.region === "По умолчанию") || null;
-        }),
-        createMany: (query) => __awaiter(void 0, void 0, void 0, function* () {
-            regionalTaxes.push(...query.data);
-            return query.data;
-        })
-    },
-    // Financial report operations
-    financialReport: {
-        findMany: (query) => __awaiter(void 0, void 0, void 0, function* () {
-            let result = [...financialReports];
-            if (query && query.where) {
-                if (query.where.year) {
-                    result = result.filter(r => r.year === query.where.year);
+            if (usePrisma) {
+                try {
+                    return yield exports.prisma.order.delete({ where: { id: query.where.id } });
                 }
-                if (query.where.month) {
-                    result = result.filter(r => r.month === query.where.month);
+                catch (error) {
+                    console.warn('Prisma error, falling back to in-memory storage:', error);
+                    usePrisma = false;
                 }
             }
-            return result;
-        }),
-        findUnique: (query) => __awaiter(void 0, void 0, void 0, function* () {
-            return financialReports.find(r => r.id === query.where.id) || null;
-        }),
-        create: (data) => __awaiter(void 0, void 0, void 0, function* () {
-            const newReport = Object.assign(Object.assign({}, data), { id: `report-${data.year}-${data.month}` });
-            // Check if report already exists
-            const existingIndex = financialReports.findIndex(r => r.year === data.year && r.month === data.month);
-            if (existingIndex !== -1) {
-                financialReports[existingIndex] = newReport;
+            // Fallback to in-memory
+            const orderIndex = inMemoryOrders.findIndex(order => order.id === query.where.id);
+            if (orderIndex !== -1) {
+                const deletedOrder = inMemoryOrders[orderIndex];
+                inMemoryOrders.splice(orderIndex, 1);
+                return deletedOrder;
             }
-            else {
-                financialReports.push(newReport);
+            throw new Error('Order not found');
+        }),
+        updateMany: (query) => __awaiter(void 0, void 0, void 0, function* () {
+            if (usePrisma) {
+                try {
+                    return yield exports.prisma.order.updateMany({ where: query.where, data: query.data });
+                }
+                catch (error) {
+                    console.warn('Prisma error, falling back to in-memory storage:', error);
+                    usePrisma = false;
+                }
             }
-            return newReport;
+            // Fallback to in-memory
+            let count = 0;
+            inMemoryOrders.forEach((order, index) => {
+                let matches = true;
+                if (query.where.userId && order.userId !== query.where.userId)
+                    matches = false;
+                if (matches) {
+                    inMemoryOrders[index] = Object.assign(Object.assign(Object.assign({}, order), query.data), { updatedAt: new Date() });
+                    count++;
+                }
+            });
+            return { count };
         })
-    }
+    },
+    // ...implement other entities as needed...
 };

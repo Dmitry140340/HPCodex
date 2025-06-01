@@ -1,314 +1,461 @@
-// In-memory database implementation
-import { User, Order, MarketRate, FinancialReport } from '../utils/api';
+// Заменяем in-memory реализацию db на PrismaClient для работы с PostgreSQL
+import { PrismaClient } from '@prisma/client';
 
-interface RegionalTax {
-  region: string;
-  environmentalTax: number;
-  customsDuty: number;
-}
-
-// In-memory data store
-let users: User[] = [
+// Fallback in-memory storage for development
+const inMemoryUsers = [
   {
     id: "user-1",
-    name: "Тестовый Пользователь",
     email: "test@example.com",
-    companyName: "Тест Ком",
-    inn: "1234567890",
-    kpp: "098765432",
-    billingAddress: "г. Тест, ул. Тестовая, д.1",
+    name: "Тестовый Пользователь",
+    password: "password123",
+    isAdmin: false,
+    role: 'client',
+    companyName: "ООО Тест",
+    inn: null,
+    kpp: null,
+    billingAddress: null,
     dashboardSettings: JSON.stringify([
       { id: 'w1', type: 'totalOrders', position: 0, size: 'small' },
       { id: 'w2', type: 'totalEarnings', position: 1, size: 'small' },
       { id: 'w3', type: 'environmentalImpact', position: 2, size: 'small' },
     ]),
-    isAdmin: false,
+    createdAt: new Date(),
+    updatedAt: new Date()
   },
   {
     id: "admin-1",
+    email: "admin@admin.com",
     name: "Администратор",
-    email: "admin@example.com",
-    companyName: "Эко Трэк",
-    isAdmin: true,
+    password: "admin123",
+    isAdmin: true,    role: 'admin',
+    companyName: "ООО Химка Пластик",
+    inn: null,
+    kpp: null,
+    billingAddress: null,
     dashboardSettings: JSON.stringify([
-      { id: 'w1', type: 'totalOrders', position: 0, size: 'large' },
+      { id: 'w1', type: 'totalOrders', position: 0, size: 'small' },
       { id: 'w2', type: 'totalEarnings', position: 1, size: 'small' },
+      { id: 'w3', type: 'environmentalImpact', position: 2, size: 'small' },
     ]),
+    createdAt: new Date(),
+    updatedAt: new Date()
+  },
+  {
+    id: "logist-1",
+    email: "logist@logistic.com",
+    name: "Логист Тестовый",
+    password: "$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi", // пароль: password
+    isAdmin: false,
+    role: 'logistic',
+    companyName: "ООО Логистика",
+    inn: null,
+    kpp: null,
+    billingAddress: null,
+    dashboardSettings: JSON.stringify([
+      { id: 'w1', type: 'totalOrders', position: 0, size: 'small' },
+      { id: 'w2', type: 'logisticRoutes', position: 1, size: 'medium' },
+      { id: 'w3', type: 'routeOptimization', position: 2, size: 'small' },
+    ]),
+    createdAt: new Date(),
+    updatedAt: new Date()
   }
 ];
 
-let orders: Order[] = [
-  {
-    id: "order-1",
-    userId: "user-1",
-    materialType: "PET",
-    volume: 500,
-    pickupAddress: "г. Москва, ул. Тверская, д.1",
-    price: 12500,
-    status: "completed",
-    paymentStatus: "paid",
-    environmentalImpact: 750,
-    createdAt: new Date("2023-01-10"),
-    updatedAt: new Date("2023-01-15"),
-  },
-  {
-    id: "order-2",
-    userId: "user-1",
-    materialType: "HDPE",
-    volume: 300,
-    pickupAddress: "г. Москва, ул. Ленина, д.15",
-    price: 9000,
-    status: "in_progress",
-    paymentStatus: "pending",
-    environmentalImpact: 450,
-    createdAt: new Date("2023-02-05"),
-    updatedAt: new Date("2023-02-10"),
-  },
-];
+const inMemoryOrders: any[] = [];
 
-let marketRates: MarketRate[] = [
-  {
-    id: "rate-1",
-    materialType: "PET",
-    pricePerKg: 25,
-    logisticsCostPerKm: 15
-  },
-  {
-    id: "rate-2",
-    materialType: "HDPE",
-    pricePerKg: 30,
-    logisticsCostPerKm: 17.5
-  },
-];
+export const prisma = new PrismaClient();
 
-let regionalTaxes: RegionalTax[] = [
-  { region: "Москва", environmentalTax: 0.5, customsDuty: 200 },
-  { region: "Санкт-Петербург", environmentalTax: 0.4, customsDuty: 180 },
-  { region: "Екатеринбург", environmentalTax: 0.3, customsDuty: 150 },
-  { region: "Новосибирск", environmentalTax: 0.35, customsDuty: 160 },
-  { region: "По умолчанию", environmentalTax: 0.25, customsDuty: 100 }
-];
+// Try to use Prisma, fallback to in-memory if fails
+let usePrisma = true;
 
-// Инициализация массива финансовых отчетов с примерами данных
-let financialReports: FinancialReport[] = [
-  {
-    id: "report-2023-1",
-    month: 1,
-    year: 2023,
-    totalPaid: 45000,
-    volume: 1800,
-    monthName: 'Январь'
-  },
-  {
-    id: "report-2023-2",
-    month: 2,
-    year: 2023,
-    totalPaid: 38000,
-    volume: 1500,
-    monthName: 'Февраль'
-  }
-];
-
-// Database interface
 export const db = {
-  // User operations
   user: {
     findUnique: async (query: { where: { id?: string; email?: string } }) => {
+      if (usePrisma) {
+        try {
+          if (query.where.id) {
+            return await prisma.user.findUnique({ where: { id: query.where.id } });
+          }
+          if (query.where.email) {
+            return await prisma.user.findUnique({ where: { email: query.where.email } });
+          }
+          return null;
+        } catch (error) {
+          console.warn('Prisma error, falling back to in-memory storage:', error);
+          usePrisma = false;
+        }
+      }
+      
+      // Fallback to in-memory
       if (query.where.id) {
-        return users.find(u => u.id === query.where.id) || null;
+        return inMemoryUsers.find(user => user.id === query.where.id) || null;
       }
       if (query.where.email) {
-        return users.find(u => u.email === query.where.email) || null;
+        return inMemoryUsers.find(user => user.email === query.where.email) || null;
       }
       return null;
     },
-    findMany: async () => {
-      return [...users];
+    findMany: async (query?: any) => {
+      if (usePrisma) {
+        try {
+          return await prisma.user.findMany(query);
+        } catch (error) {
+          console.warn('Prisma error, falling back to in-memory storage:', error);
+          usePrisma = false;
+        }
+      }
+      // Apply filters for in-memory storage
+      let users = [...inMemoryUsers];
+      if (query?.where) {
+        if (query.where.isAdmin !== undefined) {
+          users = users.filter(user => user.isAdmin === query.where.isAdmin);
+        }
+      }
+      if (query?.select) {
+        users = users.map(user => {
+          const selected: any = {};
+          for (const field in query.select) {
+            if (query.select[field] && user.hasOwnProperty(field)) {
+              selected[field] = (user as any)[field];
+            }
+          }
+          return selected;
+        });
+      }
+      return users;
     },
-    create: async (data: Omit<User, 'id'>) => {
-      const newUser: User = {
-        ...data,
+    create: async (data: any) => {
+      if (usePrisma) {
+        try {
+          return await prisma.user.create({ data });
+        } catch (error) {
+          console.warn('Prisma error, falling back to in-memory storage:', error);
+          usePrisma = false;
+        }
+      }
+      
+      // Fallback to in-memory
+      const newUser = {
         id: `user-${Date.now()}`,
+        ...data,
+        createdAt: new Date(),
+        updatedAt: new Date()
       };
-      users.push(newUser);
+      inMemoryUsers.push(newUser);
       return newUser;
     },
-    update: async (query: { where: { id: string }; data: Partial<User> }) => {
-      const userIndex = users.findIndex(u => u.id === query.where.id);
-      if (userIndex === -1) {
-        throw new Error(`User not found: ${query.where.id}`);
+    update: async (query: { where: { id: string }; data: any }) => {
+      if (usePrisma) {
+        try {
+          return await prisma.user.update({ where: { id: query.where.id }, data: query.data });
+        } catch (error) {
+          console.warn('Prisma error, falling back to in-memory storage:', error);
+          usePrisma = false;
+        }
       }
       
-      users[userIndex] = {
-        ...users[userIndex],
-        ...query.data,
-      };
-      
-      return users[userIndex];
+      // Fallback to in-memory
+      const userIndex = inMemoryUsers.findIndex(user => user.id === query.where.id);
+      if (userIndex !== -1) {
+        inMemoryUsers[userIndex] = { ...inMemoryUsers[userIndex], ...query.data, updatedAt: new Date() };
+        return inMemoryUsers[userIndex];
+      }
+      throw new Error('User not found');
     },
     delete: async (query: { where: { id: string } }) => {
-      const userIndex = users.findIndex(u => u.id === query.where.id);
-      if (userIndex === -1) {
-        throw new Error(`User not found: ${query.where.id}`);
+      if (usePrisma) {
+        try {
+          return await prisma.user.delete({ where: { id: query.where.id } });
+        } catch (error) {
+          console.warn('Prisma error, falling back to in-memory storage:', error);
+          usePrisma = false;
+        }
       }
       
-      const deletedUser = users[userIndex];
-      users.splice(userIndex, 1);
-      
-      return deletedUser;
+      // Fallback to in-memory
+      const userIndex = inMemoryUsers.findIndex(user => user.id === query.where.id);
+      if (userIndex !== -1) {
+        const deletedUser = inMemoryUsers[userIndex];
+        inMemoryUsers.splice(userIndex, 1);
+        return deletedUser;
+      }
+      throw new Error('User not found');
     }
   },
   
-  // Order operations
   order: {
-    findMany: async (query?: { where?: { userId?: string }; orderBy?: { createdAt: 'desc' | 'asc' }; include?: {user?: boolean} }) => {
-      let result = [...orders];
-      if (query && query.where && query.where.userId) {
-        result = result.filter(o => o.userId === query.where.userId);
+    findMany: async (query?: any) => {
+      if (usePrisma) {
+        try {
+          return await prisma.order.findMany({
+            where: query?.where,
+            orderBy: query?.orderBy,
+            include: query?.include,
+          });
+        } catch (error) {
+          console.warn('Prisma error, falling back to in-memory storage:', error);
+          usePrisma = false;
+        }
       }
-      if (query && query.orderBy && typeof query.orderBy.createdAt === 'string') {
-        result.sort((a, b) => {
-          const dateA = new Date(a.createdAt).getTime();
-          const dateB = new Date(b.createdAt).getTime();
-          return query.orderBy.createdAt === 'desc' ? dateB - dateA : dateA - dateB;
-        });
+      
+      // Fallback to in-memory
+      let results = [...inMemoryOrders];
+      if (query?.where?.userId) {
+        results = results.filter(order => order.userId === query.where.userId);
       }
-      if (query && query.include && query.include.user) {
-        result = result.map(order => {
-          const user = users.find(u => u.id === order.userId);
-          return { ...order, user };
-        });
+      if (query?.orderBy?.createdAt === 'desc') {
+        results.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
       }
-      return result;
-    },
-    findUnique: async (query: { where: { id: string } }) => {
-      const order = orders.find(o => o.id === query.where.id) || null;
+      return results;
+    },    findUnique: async (query: { where: { id: string }, include?: any }) => {
+      if (usePrisma) {
+        try {
+          return await prisma.order.findUnique({ where: { id: query.where.id }, include: query.include });
+        } catch (error) {
+          console.warn('Prisma error, falling back to in-memory storage:', error);
+          usePrisma = false;
+        }
+      }
+      
+      // Fallback to in-memory - ignore includes for now
+      const order = inMemoryOrders.find(order => order.id === query.where.id) || null;
+      if (order && query.include) {
+        // Mock the includes for development
+        if (query.include.user) {
+          order.user = inMemoryUsers.find(u => u.id === order.userId) || null;
+        }
+        if (query.include.logisticRoutes) {
+          order.logisticRoutes = []; // Mock empty array
+        }
+      }
       return order;
     },
-    create: async (data: Omit<Order, 'id' | 'createdAt' | 'updatedAt'>) => {
-      const newOrder: Order = {
-        ...data,
+    create: async (data: any) => {
+      if (usePrisma) {
+        try {
+          return await prisma.order.create({ data });
+        } catch (error) {
+          console.warn('Prisma error, falling back to in-memory storage:', error);
+          usePrisma = false;
+        }
+      }
+      
+      // Fallback to in-memory
+      const newOrder = {
         id: `order-${Date.now()}`,
+        ...data,
         createdAt: new Date(),
-        updatedAt: new Date(),
+        updatedAt: new Date()
       };
-      orders.push(newOrder);
+      inMemoryOrders.push(newOrder);
       return newOrder;
     },
-    update: async (query: { where: { id: string }; data: Partial<Order> }) => {
-      const orderIndex = orders.findIndex(o => o.id === query.where.id);
-      if (orderIndex === -1) {
-        throw new Error(`Order not found: ${query.where.id}`);
+    update: async (query: { where: { id: string }; data: any }) => {
+      if (usePrisma) {
+        try {
+          return await prisma.order.update({ where: { id: query.where.id }, data: query.data });
+        } catch (error) {
+          console.warn('Prisma error, falling back to in-memory storage:', error);
+          usePrisma = false;
+        }
       }
       
-      orders[orderIndex] = {
-        ...orders[orderIndex],
-        ...query.data,
-        updatedAt: new Date(),
-      };
-      
-      return orders[orderIndex];
+      // Fallback to in-memory
+      const orderIndex = inMemoryOrders.findIndex(order => order.id === query.where.id);
+      if (orderIndex !== -1) {
+        inMemoryOrders[orderIndex] = { ...inMemoryOrders[orderIndex], ...query.data, updatedAt: new Date() };
+        return inMemoryOrders[orderIndex];
+      }
+      throw new Error('Order not found');
     },
     delete: async (query: { where: { id: string } }) => {
-      const orderIndex = orders.findIndex(o => o.id === query.where.id);
-      if (orderIndex === -1) {
-        throw new Error(`Order not found: ${query.where.id}`);
-      }
-      
-      const deletedOrder = orders[orderIndex];
-      orders.splice(orderIndex, 1);
-      
-      return deletedOrder;
-    },
-    updateMany: async (query: { where: { id: string }; data: Partial<Order> }) => {
-      return db.order.update(query);
-    }
-  },
-  
-  // Market rate operations
-  marketRate: {
-    findMany: async () => {
-      return [...marketRates];
-    },
-    findFirst: async (query: { where: { materialType: string } }) => {
-      return marketRates.find(r => r.materialType === query.where.materialType) || null;
-    },
-    updateMany: async (query: { where: { materialType: string }; data: Partial<MarketRate> }) => {
-      const rateIndex = marketRates.findIndex(r => r.materialType === query.where.materialType);
-      if (rateIndex === -1) {
-        throw new Error(`Market rate not found: ${query.where.materialType}`);
-      }
-      
-      marketRates[rateIndex] = {
-        ...marketRates[rateIndex],
-        ...query.data,
-      };
-      
-      return marketRates[rateIndex];
-    },
-    createMany: async (query: { data: Omit<MarketRate, 'id'>[] }) => {
-      const newRates = query.data.map(rate => ({
-        ...rate,
-        id: `rate-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-      }));
-      
-      marketRates.push(...newRates);
-      return newRates;
-    }
-  },
-  
-  // Regional tax operations
-  regionalTax: {
-    findMany: async () => {
-      return [...regionalTaxes];
-    },
-    findFirst: async (query: { where: { region: string } }) => {
-      return regionalTaxes.find(t => t.region === query.where.region) ||
-             regionalTaxes.find(t => t.region === "По умолчанию") || null;
-    },
-    createMany: async (query: { data: RegionalTax[] }) => {
-      regionalTaxes.push(...query.data);
-      return query.data;
-    }
-  },
-  
-  // Financial report operations
-  financialReport: {
-    findMany: async (query?: { where?: { year: number; month?: number } }) => {
-      let result = [...financialReports];
-      
-      if (query && query.where) {
-        if (query.where.year) {
-          result = result.filter(r => r.year === query.where.year);
-        }
-        if (query.where.month) {
-          result = result.filter(r => r.month === query.where.month);
+      if (usePrisma) {
+        try {
+          return await prisma.order.delete({ where: { id: query.where.id } });
+        } catch (error) {
+          console.warn('Prisma error, falling back to in-memory storage:', error);
+          usePrisma = false;
         }
       }
       
-      return result;
+      // Fallback to in-memory
+      const orderIndex = inMemoryOrders.findIndex(order => order.id === query.where.id);
+      if (orderIndex !== -1) {
+        const deletedOrder = inMemoryOrders[orderIndex];
+        inMemoryOrders.splice(orderIndex, 1);
+        return deletedOrder;
+      }
+      throw new Error('Order not found');
     },
-    findUnique: async (query: { where: { id: string } }) => {
-      return financialReports.find(r => r.id === query.where.id) || null;
-    },
-    create: async (data: Omit<FinancialReport, 'id'>) => {
-      const newReport: FinancialReport = {
-        ...data,
-        id: `report-${data.year}-${data.month}`,
-      };
-      
-      // Check if report already exists
-      const existingIndex = financialReports.findIndex(
-        r => r.year === data.year && r.month === data.month
-      );
-      
-      if (existingIndex !== -1) {
-        financialReports[existingIndex] = newReport;
-      } else {
-        financialReports.push(newReport);
+    updateMany: async (query: { where: any; data: any }) => {
+      if (usePrisma) {
+        try {
+          return await prisma.order.updateMany({ where: query.where, data: query.data });
+        } catch (error) {
+          console.warn('Prisma error, falling back to in-memory storage:', error);
+          usePrisma = false;
+        }
       }
       
-      return newReport;
+      // Fallback to in-memory
+      let count = 0;
+      inMemoryOrders.forEach((order, index) => {
+        let matches = true;
+        if (query.where.userId && order.userId !== query.where.userId) matches = false;
+        if (matches) {
+          inMemoryOrders[index] = { ...order, ...query.data, updatedAt: new Date() };
+          count++;
+        }
+      });
+      return { count };
+    }
+  },
+  // Warehouse Management Models - временные заглушки
+  inventoryItem: {
+    findMany: async (query?: any) => {
+      console.warn("InventoryItem table not yet generated - returning mock data");
+      return [
+        {
+          id: "inv-1",
+          materialType: "PET",
+          availableQuantity: 1000,
+          reservedQuantity: 50,
+          location: "Склад А-1",
+          minThreshold: 100,
+          maxCapacity: 2000,
+          lastUpdated: new Date(),
+          createdAt: new Date(),
+          updatedAt: new Date()
+        },
+        {
+          id: "inv-2",
+          materialType: "HDPE",
+          availableQuantity: 800,
+          reservedQuantity: 30,
+          location: "Склад А-2",
+          minThreshold: 150,
+          maxCapacity: 1500,
+          lastUpdated: new Date(),
+          createdAt: new Date(),
+          updatedAt: new Date()
+        }
+      ];
+    },
+    findFirst: async (query?: any) => {
+      console.warn("InventoryItem table not yet generated - returning first mock item");
+      const mockData = [
+        {
+          id: "inv-1",
+          materialType: "PET",
+          availableQuantity: 1000,
+          reservedQuantity: 50,
+          location: "Склад А-1",
+          minThreshold: 100,
+          maxCapacity: 2000,
+          lastUpdated: new Date(),
+          createdAt: new Date(),
+          updatedAt: new Date()
+        },
+        {
+          id: "inv-2",
+          materialType: "HDPE",
+          availableQuantity: 800,
+          reservedQuantity: 30,
+          location: "Склад А-2",
+          minThreshold: 150,
+          maxCapacity: 1500,
+          lastUpdated: new Date(),
+          createdAt: new Date(),
+          updatedAt: new Date()
+        }
+      ];
+      
+      if (query?.where?.materialType) {
+        return mockData.find(item => item.materialType === query.where.materialType) || null;
+      }
+      return mockData[0] || null;
+    },
+    findUnique: async (query?: any) => {
+      console.warn("InventoryItem table not yet generated - returning null");
+      return null;
+    },
+    create: async (data?: any) => {
+      console.warn("InventoryItem table not yet generated - returning mock data");
+      return {
+        id: "temp-" + Date.now(),
+        ...data.data,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      };
+    },
+    update: async (data?: any) => {
+      console.warn("InventoryItem table not yet generated - returning mock data");
+      return {
+        id: data.where.id,
+        ...data.data,
+        updatedAt: new Date()
+      };
+    }
+  },
+  // Logistics Models - временные заглушки
+  logisticRoute: {
+    findMany: async (query?: any) => {
+      console.warn("LogisticRoute table not yet generated - returning empty array");
+      return [];
+    },
+    findUnique: async (query?: any) => {
+      console.warn("LogisticRoute table not yet generated - returning null");
+      return null;
+    },
+    create: async (data?: any) => {
+      console.warn("LogisticRoute table not yet generated - returning mock data");
+      return {
+        id: "temp-route-" + Date.now(),
+        ...data.data,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        routeOptions: []
+      };
+    },
+    update: async (data?: any) => {
+      console.warn("LogisticRoute table not yet generated - returning mock data");
+      return {
+        id: data.where.id,
+        ...data.data,
+        updatedAt: new Date(),
+        routeOptions: []
+      };
+    }
+  },
+
+  routeOption: {
+    updateMany: async (data?: any) => {
+      console.warn("RouteOption table not yet generated - operation skipped");
+      return { count: 0 };
+    },
+    update: async (data?: any) => {
+      console.warn("RouteOption table not yet generated - returning mock data");
+      return {
+        id: data.where.id,
+        ...data.data,
+        updatedAt: new Date()
+      };
+    }
+  },
+
+  orderDocument: {
+    findMany: async (query?: any) => {
+      console.warn("OrderDocument table not yet generated - returning empty array");
+      return [];
+    },
+    create: async (data?: any) => {
+      console.warn("OrderDocument table not yet generated - returning mock data");
+      return {
+        id: "temp-doc-" + Date.now(),
+        ...data.data,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      };
     }
   }
-}; 
+};
