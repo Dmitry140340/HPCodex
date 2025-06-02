@@ -207,27 +207,35 @@ export async function calculateOrderPrice(orderData: PriceParams): Promise<Price
   // Гарантируем неотрицательные значения
   const safeVolume = Math.max(0, orderData.volume);
   const safeDistance = Math.max(0, distance);
+  
   // Константы для расчета согласно ТЗ
   const LOGISTICS_COST_PER_KM = 70; // Ld = 70 рублей (константа)
   const customsDuty = 200; // Tc - таможенные пошлины
   const environmentalTaxRate = 0.5; // Me - экологический налог
   const region = await getRegionFromAddress(orderData.pickupAddress);
   const environmentalImpact = safeVolume * 1.5; // 1.5kg CO2 saved per kg recycled
+  
   // Формула по ТЗ: C = (P_m * V) + (L_d * D) + T_c + M_e
   // P_m - средняя рыночная стоимость от API бирж
   // V - объем заказа, введенный пользователем  
   // L_d - 70 рублей константа
   // D - расстояние от API Яндекс.Карт
   const basePrice = safeVolume * materialPrice; // (P_m * V)
-  const logisticsCost = LOGISTICS_COST_PER_KM * safeDistance; // (L_d * D)
+  
+  // Расчет логистических расходов через картографические API
+  const logisticsCost = await calculateLogisticsCosts(orderData.pickupAddress, safeDistance);
+  
+  // Добавляем экологические налоги и таможенные сборы
   const environmentalTax = safeVolume * environmentalTaxRate; // M_e
-  let totalPrice = basePrice + logisticsCost + customsDuty + environmentalTax;
+  const totalCustomsDuty = await calculateCustomsDuty(orderData.materialType, safeVolume);
+  
+  let totalPrice = basePrice + logisticsCost + totalCustomsDuty + environmentalTax;
   if (totalPrice < 0) totalPrice = 0;
 
   return {
     basePrice,
     logisticsCost,
-    customsDuty,
+    customsDuty: totalCustomsDuty,
     environmentalTax,
     distance: safeDistance,
     region,
@@ -237,19 +245,71 @@ export async function calculateOrderPrice(orderData: PriceParams): Promise<Price
   };
 }
 
+// Calculate logistics costs using Google Maps/Yandex Maps API
+async function calculateLogisticsCosts(pickupAddress: string, distance: number): Promise<number> {
+  try {
+    const LOGISTICS_COST_PER_KM = 70;
+    
+    // Get traffic conditions and route optimization from mapping API
+    const { yandexMapsService } = await import('../utils/yandexMaps');
+    const routeInfo = await yandexMapsService.getOptimalRoute(pickupAddress, 'Москва, центр переработки');
+    
+    if (routeInfo && routeInfo.distance) {
+      const actualDistance = routeInfo.distance / 1000; // Convert to km
+      const trafficMultiplier = routeInfo.duration > actualDistance * 60 ? 1.2 : 1.0; // Traffic penalty
+      return actualDistance * LOGISTICS_COST_PER_KM * trafficMultiplier;
+    }
+    
+    // Fallback to simple calculation
+    return distance * LOGISTICS_COST_PER_KM;
+  } catch (error) {
+    console.error('Error calculating logistics costs via API:', error);
+    // Fallback to simple calculation
+    return distance * 70;
+  }
+}
+
+// Calculate customs duty based on material type and volume
+async function calculateCustomsDuty(materialType: string, volume: number): Promise<number> {
+  const customsRates = {
+    'PET': 150,
+    'HDPE': 180,
+    'PP': 160,
+    'PVC': 200,
+    'PS': 170,
+    'PC': 220,
+    'Other': 200
+  };
+  
+  const baseRate = customsRates[materialType] || customsRates['Other'];
+  
+  // Volume-based scaling
+  const volumeMultiplier = volume > 1000 ? 1.1 : 1.0;
+  
+  return baseRate * volumeMultiplier;
+}
+
 export async function createOrder(orderData: OrderData, authContext?: any): Promise<Order> {
   const auth = authContext || await getAuth();
   if (!auth.userId) {
     throw new Error("Not authenticated");
   }
 
+  // Валидация данных клиента (тип сырья, объём, адрес)
+  const validationResult = await validateOrderData(orderData);
+  if (!validationResult.isValid) {
+    throw new Error(`Ошибка валидации данных: ${validationResult.errors.join(', ')}`);
+  }
+
   // Check inventory availability before proceeding
   const isAvailable = await checkInventoryAvailability(orderData.materialType, orderData.volume);
   if (!isAvailable) {
-    throw new Error(`Insufficient inventory for ${orderData.materialType}. Required: ${orderData.volume} kg`);
+    // Escalate to warehouse department for manual intervention
+    await notifyWarehouseDepartment(orderData, 'insufficient_inventory');
+    throw new Error(`Недостаток сырья ${orderData.materialType}. Требуется: ${orderData.volume} кг. Складской отдел уведомлен.`);
   }
 
-  // Calculate price and environmental impact
+  // Calculate price and environmental impact with external API integration
   const priceCalculation = await calculateOrderPrice(orderData);
 
   // ВАЖНО: явно указываем все обязательные поля для Prisma
@@ -263,7 +323,6 @@ export async function createOrder(orderData: OrderData, authContext?: any): Prom
     paymentStatus: "unpaid",
     environmentalImpact: priceCalculation.environmentalImpact,
   });
-
   // Reserve material in inventory after order creation
   try {
     await reserveMaterial({
@@ -272,9 +331,12 @@ export async function createOrder(orderData: OrderData, authContext?: any): Prom
       orderId: order.id
     });
   } catch (error) {
-    // If reservation fails, delete the order and re-throw error
+    // If reservation fails, escalate to warehouse department
+    await notifyWarehouseDepartment(orderData, 'reservation_failed');
+    
+    // Delete the order and re-throw error
     await db.order.delete({ where: { id: order.id } });
-    throw new Error(`Failed to reserve materials: ${error.message}`);
+    throw new Error(`Не удалось зарезервировать материалы: ${error.message}. Складской отдел уведомлён.`);
   }
   // Получаем данные пользователя для отправки уведомлений
   const user = await db.user.findUnique({ 
@@ -345,11 +407,102 @@ export async function createOrder(orderData: OrderData, authContext?: any): Prom
   } catch (error) {
     console.error('❌ Ошибка отправки fallback email:', error);
   }
-
   // Автоматически создаем логистические маршруты для нового заказа
   await createAutomaticLogisticRoutes(order.id, orderData.pickupAddress);
 
   return order;
+}
+
+// Order validation function
+async function validateOrderData(orderData: OrderData): Promise<{ isValid: boolean; errors: string[] }> {
+  const errors: string[] = [];
+  
+  // Validate material type
+  const validMaterialTypes = ['PET', 'HDPE', 'PP', 'PVC', 'PS', 'PC', 'Other'];
+  if (!validMaterialTypes.includes(orderData.materialType)) {
+    errors.push('Недопустимый тип сырья');
+  }
+  
+  // Validate volume
+  if (orderData.volume <= 0 || orderData.volume > 10000) {
+    errors.push('Объём должен быть от 1 до 10000 кг');
+  }
+  
+  // Validate pickup address
+  if (!orderData.pickupAddress || orderData.pickupAddress.length < 10) {
+    errors.push('Адрес вывоза должен содержать минимум 10 символов');
+  }
+  
+  // Validate address format with external API
+  try {
+    const addressValidation = await validateAddressWithAPI(orderData.pickupAddress);
+    if (!addressValidation.isValid) {
+      errors.push('Адрес не найден или указан некорректно');
+    }
+  } catch (error) {
+    console.error('Address validation error:', error);
+    errors.push('Не удалось проверить адрес');
+  }
+  
+  return {
+    isValid: errors.length === 0,
+    errors
+  };
+}
+
+// Validate address using external API (Yandex Maps)
+async function validateAddressWithAPI(address: string): Promise<{ isValid: boolean; details?: any }> {
+  try {
+    const { yandexMapsService } = await import('../utils/yandexMaps');
+    const result = await yandexMapsService.geocodeAddress(address);
+    return {
+      isValid: result && result.coordinates && result.coordinates.length === 2,
+      details: result
+    };
+  } catch (error) {
+    console.error('Yandex Maps API validation error:', error);
+    return { isValid: false };
+  }
+}
+
+// Notify warehouse department about inventory issues
+async function notifyWarehouseDepartment(orderData: OrderData, issueType: string): Promise<void> {
+  try {
+    // Get warehouse staff
+    const warehouseStaff = await getUsersByRole('warehouse');
+    
+    if (warehouseStaff.length === 0) {
+      console.warn('No warehouse staff found for notification');
+      return;
+    }
+    
+    const { enhancedNotificationService } = await import('../utils/enhancedNotifications');
+    
+    for (const staff of warehouseStaff) {
+      await enhancedNotificationService.sendNotificationFromTemplate(
+        'warehouse-manual-intervention',
+        staff.id,
+        {
+          materialType: orderData.materialType,
+          requiredVolume: orderData.volume.toString(),
+          issueType: issueType === 'insufficient_inventory' ? 'Недостаток сырья' : 'Проблема резервирования',
+          pickupAddress: orderData.pickupAddress,
+          warehouseStaffName: staff.name || 'Сотрудник склада',
+          dashboardUrl: `${process.env.FRONTEND_URL}/warehouse`
+        },
+        {
+          userEmail: staff.email,
+          userPhone: undefined,
+          orderId: 'pending',
+          priority: 'high'
+        }
+      );
+    }
+    
+    console.log(`✅ Складской отдел уведомлен о проблеме: ${issueType}`);
+  } catch (error) {
+    console.error('❌ Ошибка уведомления складского отдела:', error);
+  }
 }
 
 export async function getUserOrders(authContext?: any): Promise<Order[]> {
@@ -1486,7 +1639,7 @@ export async function createAutomaticLogisticRoutes(orderId: string, pickupAddre
   }
 }
 
-// Document Generation
+// Document Generation - Enhanced contract generation
 export async function generateOrderDocumentation(orderId: string): Promise<OrderDocument> {
   const order = await db.order.findUnique({
     where: { id: orderId },
@@ -1509,35 +1662,140 @@ export async function generateOrderDocumentation(orderId: string): Promise<Order
   const selectedRoute = order.logisticRoutes.find(r => r.status === 'accepted');
   const selectedOption = selectedRoute?.routeOptions.find(o => o.isSelected);
 
+  // Generate comprehensive contract document
+  const contractData = await generateContractData(order, selectedRoute, selectedOption);
+
   const documentData = {
     orderId: order.id,
-    documentType: 'DELIVERY_INVOICE' as const,
+    documentType: 'DELIVERY_CONTRACT' as const,
     generatedAt: new Date(),
     customerInfo: {
       name: order.user.name,
       email: order.user.email,
       company: order.user.companyName || 'Частное лицо',
-      address: order.pickupAddress
+      inn: order.user.inn || 'Не указан',
+      kpp: order.user.kpp || 'Не указан',
+      address: order.pickupAddress,
+      billingAddress: order.user.billingAddress || order.pickupAddress
     },
     orderDetails: {
       materialType: order.materialType,
       volume: order.volume,
       price: order.price,
-      environmentalImpact: order.environmentalImpact
+      environmentalImpact: order.environmentalImpact,
+      contractNumber: generateContractNumber(order.id),
+      contractDate: new Date().toISOString(),
+      validUntil: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(), // 30 days
+      terms: contractData.terms,
+      specifications: contractData.specifications
     },
     logisticsInfo: selectedOption ? {
       routeName: selectedOption.name,
       transportType: selectedOption.transportType,
       estimatedCost: selectedOption.estimatedCost,
       estimatedTime: selectedOption.estimatedTime,
-      distance: selectedRoute.estimatedDistance
+      distance: selectedRoute.estimatedDistance,
+      deliveryTerms: contractData.deliveryTerms
     } : null,
     status: 'generated' as const
   };
 
-  return await db.orderDocument.create({
+  const document = await db.orderDocument.create({
     data: documentData
   });
+
+  // Notify client that contract is ready
+  await notifyClientContractReady(order.user, order.id, document.id);
+
+  return document;
+}
+
+// Generate contract data with terms and conditions
+async function generateContractData(order: any, route: any, option: any) {
+  return {
+    terms: {
+      payment: 'Оплата в течение 7 дней с момента подписания договора',
+      delivery: 'Доставка осуществляется в течение 5 рабочих дней',
+      quality: 'Материал должен соответствовать ГОСТ 30340-2013',
+      liability: 'Стороны несут ответственность согласно действующему законодательству РФ',
+      warranty: 'Гарантия качества переработки - 1 год'
+    },
+    specifications: {
+      materialGrade: getMaterialGrade(order.materialType),
+      processingMethod: getProcessingMethod(order.materialType),
+      environmentalCertification: 'ISO 14001:2015',
+      recyclingEfficiency: '95%'
+    },
+    deliveryTerms: route ? {
+      pickupSchedule: 'По согласованию с клиентом',
+      transportInsurance: 'Включена в стоимость',
+      handlingInstructions: 'Бережная погрузка и транспортировка'
+    } : null
+  };
+}
+
+// Generate unique contract number
+function generateContractNumber(orderId: string): string {
+  const date = new Date();
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const orderShort = orderId.substring(0, 8).toUpperCase();
+  return `ДОГ-${year}${month}-${orderShort}`;
+}
+
+// Get material grade specifications
+function getMaterialGrade(materialType: string): string {
+  const grades = {
+    'PET': 'ПЭТ-1 (пищевой)',
+    'HDPE': 'ПВД высокой плотности',
+    'PP': 'ПП техническое применение',
+    'PVC': 'ПВХ строительное применение',
+    'PS': 'ПС общего назначения',
+    'PC': 'ПК оптическое качество'
+  };
+  return grades[materialType] || 'Стандартный сорт';
+}
+
+// Get processing method
+function getProcessingMethod(materialType: string): string {
+  const methods = {
+    'PET': 'Химическая переработка + гранулирование',
+    'HDPE': 'Механическая переработка + экструзия',
+    'PP': 'Термическая переработка + литьё',
+    'PVC': 'Измельчение + повторная формовка',
+    'PS': 'Растворение + очистка + гранулирование',
+    'PC': 'Деполимеризация + ресинтез'
+  };
+  return methods[materialType] || 'Стандартная переработка';
+}
+
+// Notify client that contract is ready
+async function notifyClientContractReady(user: any, orderId: string, documentId: string): Promise<void> {
+  try {
+    const { enhancedNotificationService } = await import('../utils/enhancedNotifications');
+    
+    await enhancedNotificationService.sendNotificationFromTemplate(
+      'contract-ready',
+      user.id,
+      {
+        customerName: user.name || 'Уважаемый клиент',
+        orderId: orderId,
+        contractNumber: generateContractNumber(orderId),
+        downloadUrl: `${process.env.FRONTEND_URL}/documents/${documentId}`,
+        dashboardUrl: `${process.env.FRONTEND_URL}/dashboard?tab=orders&order=${orderId}`
+      },
+      {
+        userEmail: user.email,
+        userPhone: undefined,
+        orderId: orderId,
+        priority: 'medium'
+      }
+    );
+    
+    console.log(`✅ Клиент ${user.email} уведомлен о готовности договора для заказа ${orderId}`);
+  } catch (error) {
+    console.error('❌ Ошибка уведомления клиента о готовности договора:', error);
+  }
 }
 
 export async function getOrderDocuments(orderId: string): Promise<OrderDocument[]> {
