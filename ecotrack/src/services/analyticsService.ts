@@ -253,18 +253,52 @@ export const analyticsService = {
 
   async getRealTimeKPIs() {
     console.log('⚡ Getting real-time KPIs');
-    return {
-      timestamp: new Date(),
-      kpis: {
-        activeOrders: 45,
-        todayRevenue: 28500,
-        processingTime: '2.3 hours',
-        customerSatisfaction: 4.6,
-        wasteProcessed: '1.2 tons',
-        environmentalSaving: '890 kg CO2'
-      },
-      status: 'healthy'
-    };
+
+    try {
+      const startOfToday = new Date();
+      startOfToday.setHours(0, 0, 0, 0);
+
+      const activeOrders = await db.order.count({
+        where: {
+          status: { notIn: ['completed', 'cancelled'] }
+        }
+      });
+
+      const todayRevenueAgg = await db.order.aggregate({
+        where: {
+          status: 'completed',
+          createdAt: { gte: startOfToday }
+        },
+        _sum: { price: true }
+      });
+
+      return {
+        timestamp: new Date(),
+        kpis: {
+          activeOrders,
+          todayRevenue: todayRevenueAgg._sum.price || 0,
+          processingTime: '2.3 hours',
+          customerSatisfaction: 4.6,
+          wasteProcessed: '1.2 tons',
+          environmentalSaving: '890 kg CO2'
+        },
+        status: 'healthy'
+      };
+    } catch (error) {
+      console.error('Error calculating real-time KPIs:', error);
+      return {
+        timestamp: new Date(),
+        kpis: {
+          activeOrders: 0,
+          todayRevenue: 0,
+          processingTime: '0',
+          customerSatisfaction: 0,
+          wasteProcessed: '0',
+          environmentalSaving: '0'
+        },
+        status: 'error'
+      };
+    }
   },
 
   async getMaterialDistribution(period: string) {
